@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>myopic — reportable stories</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5;
+    --card: #ffffff;
+    --text: #1a1a1a;
+    --muted: #6b6b6b;
+    --accent: #2f5fd6;
+    --badge-bg: #e8edfb;
+    --badge-text: #2f5fd6;
+    --border: #e4e4e0;
+    --pos-bg: #e3f3e6; --pos-text: #1f7a3a;
+    --neg-bg: #fbe7e6; --neg-text: #b23b32;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15161a;
+      --card: #1f2026;
+      --text: #ececea;
+      --muted: #9a9a9a;
+      --accent: #7fa0ff;
+      --badge-bg: #26304a;
+      --badge-text: #a9bdff;
+      --border: #2d2e34;
+      --pos-bg: #1c3324; --pos-text: #7fd999;
+      --neg-bg: #3a2220; --neg-text: #e9948c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  .page {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 2.5rem 1.25rem 4rem;
+  }
+  header { margin-bottom: 2rem; }
+  h1 {
+    font-size: 1.5rem;
+    margin: 0 0 0.25rem;
+  }
+  header p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .story {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.4rem;
+    margin-bottom: 1.1rem;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    align-items: center;
+    margin-bottom: 0.7rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .badge {
+    display: inline-block;
+    background: var(--badge-bg);
+    color: var(--badge-text);
+    border-radius: 999px;
+    padding: 0.15rem 0.6rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+  .summary {
+    margin: 0 0 0.9rem;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  .sources {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    border-top: 1px solid var(--border);
+    padding-top: 0.7rem;
+  }
+  .source-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+  }
+  .source-row a {
+    color: var(--text);
+    text-decoration: none;
+    flex: 1;
+  }
+  .source-row a:hover { color: var(--accent); }
+  .source-tag {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    flex-shrink: 0;
+    width: 7rem;
+  }
+  .sentiment {
+    font-size: 0.72rem;
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 0.1rem 0.5rem;
+    flex-shrink: 0;
+  }
+  .sentiment.positive { background: var(--pos-bg); color: var(--pos-text); }
+  .sentiment.negative { background: var(--neg-bg); color: var(--neg-text); }
+  .empty {
+    color: var(--muted);
+    padding: 3rem 0;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>Reportable stories</h1>
+    <p>Topics of interest, clustered across sources and summarized locally.</p>
+  </header>
+
+  {% if stories %}
+    {% for story in stories %}
+    <article class="story">
+      <div class="meta">
+        <span>{{ story.updated_at.strftime('%d %b %Y, %H:%M') }}</span>
+        {% for entity in story.matched_entities if entity %}
+        <span class="badge">{{ entity }}</span>
+        {% endfor %}
+      </div>
+      <p class="summary">{{ story.summary_text }}</p>
+      <div class="sources">
+        {% for article in story.source_articles %}
+        <div class="source-row">
+          <span class="source-tag">{{ article.source }}</span>
+          <a href="{{ article.url }}" target="_blank" rel="noopener">{{ article.headline }}</a>
+          {% if article.sentiment_label %}
+          <span class="sentiment {{ article.sentiment_label|lower }}">{{ article.sentiment_label }}</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </article>
+    {% endfor %}
+  {% else %}
+    <p class="empty">No reportable stories yet — nothing scraped so far has matched the watchlist.</p>
+  {% endif %}
+</div>
+</body>
+</html>

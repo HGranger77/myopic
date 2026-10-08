@@ -1,0 +1,26 @@
+# grafana/grafana values - no secrets here (see grafana-secret-values.yaml,
+# generated locally and gitignored, for the Postgres datasource password).
+adminUser: admin
+adminPassword: admin
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+
+persistence:
+  enabled: false  # everything here is provisioned as code; no need to persist ad-hoc UI edits
+
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    labelValue: "1"
+
+# Datasources (Prometheus + Postgres) are provisioned together via
+# grafana-secret-values.yaml (gitignored - holds the Postgres password).
+# Helm doesn't merge YAML lists across -f files, so both datasources must
+# live in the same file or the second -f would silently replace the first.

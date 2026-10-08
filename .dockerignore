@@ -1,0 +1,8 @@
+venv-myopic/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.env
+tests/
+.pytest_cache/

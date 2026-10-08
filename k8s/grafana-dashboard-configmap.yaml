@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-myopic
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  myopic-pipeline.json: |
+    {
+      "title": "myopic pipeline",
+      "schemaVersion": 39,
+      "timezone": "browser",
+      "time": { "from": "now-24h", "to": "now" },
+      "refresh": "30s",
+      "panels": [
+        {
+          "id": 1,
+          "title": "Batch run duration (minutes)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "postgres", "uid": "myopic-postgres" },
+          "targets": [
+            {
+              "datasource": { "type": "postgres", "uid": "myopic-postgres" },
+              "format": "time_series",
+              "rawSql": "SELECT started_at AS \"time\", EXTRACT(EPOCH FROM (finished_at - started_at)) / 60.0 AS \"duration_minutes\" FROM scrape_runs WHERE finished_at IS NOT NULL ORDER BY started_at",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Articles matched / summarized per run",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "postgres", "uid": "myopic-postgres" },
+          "targets": [
+            {
+              "datasource": { "type": "postgres", "uid": "myopic-postgres" },
+              "format": "time_series",
+              "rawSql": "SELECT started_at AS \"time\", articles_matched, summaries_generated FROM scrape_runs ORDER BY started_at",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Pod memory usage (working set)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "myopic-prometheus" },
+          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "myopic-prometheus" },
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"default\", container!=\"\", image!=\"\"}) by (pod)",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Pod CPU usage (cores)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "myopic-prometheus" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "myopic-prometheus" },
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"default\", container!=\"\", image!=\"\"}[5m])) by (pod)",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

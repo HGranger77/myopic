@@ -1,0 +1,20 @@
+# Argo Workflows' per-step "wait" sidecar reports step outputs back to the
+# controller by creating a WorkflowTaskResult object in the *workflow's own*
+# namespace. The myopic-batch CronWorkflow runs in `default` (alongside
+# postgres/the API), so the namespace's default ServiceAccount needs create
+# permission on workflowtaskresults - granted by the argo-aggregate-to-edit
+# ClusterRole (NOT argo-cluster-role, which is scoped to the controller
+# itself and only has list/watch/deletecollection on this resource).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: default-workflow-role
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argo-aggregate-to-edit
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: default

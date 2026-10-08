@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  # v2: minikube's bundled storage-provisioner doesn't reliably honor the
+  # Delete reclaim policy - a PVC recreated under the old name reattached
+  # the previous PVC's on-disk data instead of getting a fresh volume.
+  # Renaming forces a genuinely new hostPath allocation.
+  name: postgres-pvc-v2
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

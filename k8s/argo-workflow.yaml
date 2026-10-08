@@ -1,0 +1,352 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: myopic-batch
+  namespace: default
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  timezone: UTC
+  schedules:
+  - 0 6 * * *
+  workflowSpec:
+    entrypoint: pipeline
+    serviceAccountName: default
+    templates:
+    - name: start-run
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - start-run
+        - --out-dir
+        - /tmp/outputs
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+      outputs:
+        parameters:
+        - name: run-id
+          valueFrom:
+            path: /tmp/outputs/run_id
+    - name: discover
+      volumes:
+      - name: myopic-sources
+        configMap:
+          name: myopic-sources
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - discover
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        - --source
+        - '{{inputs.parameters.source}}'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        volumeMounts:
+        - name: myopic-sources
+          mountPath: /app/config/sources.yaml
+          subPath: sources.yaml
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+      inputs:
+        parameters:
+        - name: run-id
+        - name: source
+      retryStrategy:
+        limit: '2'
+    - name: fetch-article-bodies
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - fetch-article-bodies
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: '1'
+            memory: 512Mi
+          requests:
+            cpu: 300m
+            memory: 256Mi
+    - name: filter-article
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - filter-article
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: '1'
+            memory: 1536Mi
+          requests:
+            cpu: 300m
+            memory: 768Mi
+      inputs:
+        parameters:
+        - name: run-id
+    - name: embed-article
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - embed-article
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: '1'
+            memory: 1Gi
+          requests:
+            cpu: 300m
+            memory: 512Mi
+    - name: cluster-stories
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - cluster-stories
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+      inputs:
+        parameters:
+        - name: run-id
+    - name: summarize-story
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - summarize-story
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: '1'
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+      inputs:
+        parameters:
+        - name: run-id
+    - name: sentiment-article
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - sentiment-article
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: '1'
+            memory: 1Gi
+          requests:
+            cpu: 300m
+            memory: 512Mi
+      inputs:
+        parameters:
+        - name: run-id
+    - name: story-entities
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - story-entities
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: '1'
+            memory: 1536Mi
+          requests:
+            cpu: 300m
+            memory: 768Mi
+      inputs:
+        parameters:
+        - name: run-id
+    - name: finalize
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - finalize
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: 300m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+      inputs:
+        parameters:
+        - name: run-id
+    - name: pipeline
+      dag:
+        tasks:
+        - name: start-run
+          template: start-run
+        - name: discover
+          template: discover
+          dependencies:
+          - start-run
+          withItems:
+          - nine_com_au
+          - abc_net_au
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
+            - name: source
+              value: '{{item}}'
+          continueOn:
+            failed: true
+        - name: fetch-article-bodies
+          template: fetch-article-bodies
+          dependencies:
+          - discover
+        - name: filter-article
+          template: filter-article
+          dependencies:
+          - fetch-article-bodies
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
+        - name: embed-article
+          template: embed-article
+          dependencies:
+          - filter-article
+        - name: cluster-stories
+          template: cluster-stories
+          dependencies:
+          - embed-article
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
+        - name: summarize-story
+          template: summarize-story
+          dependencies:
+          - cluster-stories
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
+        - name: sentiment-article
+          template: sentiment-article
+          dependencies:
+          - cluster-stories
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
+        - name: story-entities
+          template: story-entities
+          dependencies:
+          - cluster-stories
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
+        - name: finalize
+          template: finalize
+          dependencies:
+          - summarize-story
+          - sentiment-article
+          - story-entities
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
+    podGC:
+      strategy: OnPodCompletion

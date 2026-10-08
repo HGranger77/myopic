@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements-batch.txt .
+RUN pip install --no-cache-dir -r requirements-batch.txt
+
+# Bake every model's weights into the image so no stage ever needs internet
+# access beyond the news sites themselves.
+RUN python -m spacy download en_core_web_sm
+RUN python -c "from transformers import pipeline; pipeline('summarization', model='sshleifer/distilbart-cnn-12-6')"
+RUN python -c "from transformers import pipeline; pipeline('sentiment-analysis', model='distilbert-base-uncased-finetuned-sst-2-english')"
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
+COPY . .
+# No single default subcommand makes sense any more (discover/filter-article/
+# etc. are separate stages) - Argo always overrides this with an explicit
+# command, so this default just surfaces the real subcommands instead of
+# silently doing nothing useful.
+CMD ["python", "run_batch.py", "-h"]
