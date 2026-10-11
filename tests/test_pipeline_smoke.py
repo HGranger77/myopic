@@ -6,6 +6,7 @@ from nlp import embedding as embedding_module
 from nlp import ner as ner_module
 from nlp import sentiment as sentiment_module
 from nlp import summarize as summarize_module
+from nlp import tagging as tagging_module
 from scraper import fetch
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -42,6 +43,18 @@ def _fake_extract_entities(text):
     ]
 
 
+def _fake_check_relevance(text, watchlist):
+    # Mirrors the real signature but sidesteps the classifier model entirely
+    # - the smoke test is about the DAG wiring, not relevance-judgment
+    # quality, so it just matches whatever watchlist entity is seeded
+    # (always "Joe Biden" here) regardless of the fixture article's actual
+    # content.
+    return [
+        {"watchlist_entity_id": entry["watchlist_entity_id"], "canonical_name": entry["canonical_name"]}
+        for entry in watchlist
+    ]
+
+
 def _fake_embed(text):
     return [0.1] * 384
 
@@ -63,6 +76,7 @@ def _patch_models(monkeypatch):
     monkeypatch.setattr(fetch, "get_many", _fake_get_many)
     monkeypatch.setattr(run_batch, "load_sources", lambda: FAKE_SOURCES)
     monkeypatch.setattr(ner_module, "extract_entities", _fake_extract_entities)
+    monkeypatch.setattr(tagging_module, "check_relevance", _fake_check_relevance)
     monkeypatch.setattr(embedding_module, "embed", _fake_embed)
     monkeypatch.setattr(summarize_module, "summarize", _fake_summarize)
     monkeypatch.setattr(sentiment_module, "analyze", _fake_analyze_sentiment)
@@ -74,19 +88,25 @@ def test_pipeline_end_to_end(monkeypatch, tmp_path):
     _patch_models(monkeypatch)
 
     # Mirrors the full Argo DAG: start-run -> discover -> fetch-article-bodies
-    # -> filter-article -> embed-article -> cluster-stories -> the three
-    # parallel branches -> finalize.
+    # -> translate-article -> embed-article -> cluster-stories ->
+    # summarize-story -> tag-relevance ->
+    # [sentiment-article, article-entities] -> finalize.
+    # Relevance is decided AFTER clustering/summarizing now, not before -
+    # see tag_relevance()'s docstring in run_batch.py.
     assert run_batch.start_run(tmp_path) == 0
     run_id = int((tmp_path / "run_id").read_text())
 
     assert run_batch.discover(run_id, "nine_com_au") == 0
     assert run_batch.fetch_article_bodies() == 0
-    assert run_batch.filter_article(run_id) == 0
+    # FAKE_SOURCES has no non-"en" source, so this should early-exit without
+    # ever importing nlp.translate (no model to stub out here).
+    assert run_batch.translate_article() == 0
     assert run_batch.embed_article() == 0
     assert run_batch.cluster_stories(run_id) == 0
     assert run_batch.summarize_story(run_id) == 0
+    assert run_batch.tag_relevance(run_id) == 0
     assert run_batch.sentiment_article(run_id) == 0
-    assert run_batch.story_entities(run_id) == 0
+    assert run_batch.article_entities(run_id) == 0
     assert run_batch.finalize(run_id) == 0
 
     touched = ops.get_touched_story_ids(run_id)
@@ -105,8 +125,8 @@ def test_pipeline_end_to_end(monkeypatch, tmp_path):
             summary_row = cur.fetchone()
             cur.execute("SELECT sentiment_label FROM article_sentiment WHERE article_id = %s", (articles[0]["id"],))
             sentiment_row = cur.fetchone()
-            cur.execute("SELECT count(*) AS n FROM story_entities WHERE story_id = %s", (story_id,))
-            entity_count = cur.fetchone()["n"]
+            cur.execute("SELECT count(*) AS n FROM article_entities WHERE article_id = %s", (articles[0]["id"],))
+            article_entity_count = cur.fetchone()["n"]
 
     assert run_row["status"] == "success"
     assert run_row["articles_matched"] == 1
@@ -114,14 +134,16 @@ def test_pipeline_end_to_end(monkeypatch, tmp_path):
     assert run_row["summaries_generated"] == 1
     assert summary_row["summary_text"] == "A stubbed summary of the story."
     assert sentiment_row["sentiment_label"] == "POSITIVE"
-    assert entity_count == 1
+    assert article_entity_count == 1
 
 
-def test_filter_article_worklist_excludes_already_filtered(monkeypatch, tmp_path):
-    """Retry-safety for the new single-task-per-stage design comes from the
-    worklist query itself (is_relevant IS NULL), not a delete-then-reinsert
-    per item - a retried task just finds nothing left to do for articles it
-    already finished."""
+def test_tag_relevance_retry_does_not_duplicate_matches(monkeypatch, tmp_path):
+    """tag-relevance always re-classifies every touched story (unlike the old
+    filter-article, it has no "already done" worklist guard, since a story's
+    summary - and therefore its relevance - can legitimately change as more
+    articles join it). Retry-safety instead comes from delete-then-reinsert
+    per member article: calling it twice must not duplicate watchlist_matches
+    rows."""
     entity = ops.create_watchlist_entity("Joe Biden")
     ops.add_alias(entity["id"], "Biden")
     _patch_models(monkeypatch)
@@ -130,18 +152,18 @@ def test_filter_article_worklist_excludes_already_filtered(monkeypatch, tmp_path
     run_id = int((tmp_path / "run_id").read_text())
     run_batch.discover(run_id, "nine_com_au")
     run_batch.fetch_article_bodies()
+    run_batch.embed_article()
+    run_batch.cluster_stories(run_id)
+    run_batch.summarize_story(run_id)
 
-    run_batch.filter_article(run_id)
-    run_batch.filter_article(run_id)  # simulate a retried task - should find nothing left to do
+    run_batch.tag_relevance(run_id)
+    run_batch.tag_relevance(run_id)  # simulate a retried task
 
     with ops.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM articles LIMIT 1")
             article_id = cur.fetchone()["id"]
-            cur.execute("SELECT count(*) AS n FROM article_entities WHERE article_id = %s", (article_id,))
-            entity_count = cur.fetchone()["n"]
             cur.execute("SELECT count(*) AS n FROM watchlist_matches WHERE article_id = %s", (article_id,))
             match_count = cur.fetchone()["n"]
 
-    assert entity_count == 1  # not duplicated by the second pass
-    assert match_count == 1
+    assert match_count == 1  # not duplicated by the second pass

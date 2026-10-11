@@ -287,18 +287,56 @@ def mark_article_failed(article_id: int, error: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# filter-article: topic-of-interest relevance + per-article entities
+# translate-article: non-English sources only (see config/sources.yaml)
 # ---------------------------------------------------------------------------
 
-def get_articles_needing_filtering() -> list[dict]:
-    """Fetched articles not yet run through filter-article."""
+def get_articles_needing_translation(
+    source_modules: list[str], limit: Optional[int] = None
+) -> list[dict]:
+    """Fetched articles from a non-English source not yet translated, oldest
+    first. source_modules: the subset of config/sources.yaml's modules whose
+    `language` isn't "en" - empty means nothing to do, no query needed.
+    limit: run_batch.py's TRANSLATE_MAX_ARTICLES caps the per-run cost of
+    this autoregressive, not-yet-rate-limited stage - leftover articles just
+    wait for a later run. None means no cap (e.g. for tests)."""
+    if not source_modules:
+        return []
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT * FROM articles WHERE fetch_status = 'fetched' AND is_relevant IS NULL"
+                """
+                SELECT * FROM articles
+                WHERE fetch_status = 'fetched' AND source = ANY(%s) AND original_body_text IS NULL
+                ORDER BY discovered_at
+                LIMIT %s
+                """,
+                (source_modules, limit),
             )
             return [dict(row) for row in cur.fetchall()]
 
+
+def set_article_translation(
+    article_id: int, translated_headline: str, translated_body_text: str
+) -> None:
+    """Moves the as-scraped headline/body_text into original_headline/
+    original_body_text, then replaces them with the English translation -
+    every stage downstream just reads headline/body_text either way."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE articles
+                SET original_headline = headline, original_body_text = body_text,
+                    headline = %s, body_text = %s
+                WHERE id = %s
+                """,
+                (translated_headline, translated_body_text, article_id),
+            )
+
+
+# ---------------------------------------------------------------------------
+# tag-relevance: story-level topic classification, stamped onto member articles
+# ---------------------------------------------------------------------------
 
 def set_article_relevance(article_id: int, is_relevant: bool) -> None:
     with get_connection() as conn:
@@ -308,39 +346,12 @@ def set_article_relevance(article_id: int, is_relevant: bool) -> None:
             )
 
 
-def delete_article_entities(article_id: int) -> None:
-    """Clears prior entities/matches for an article before reprocessing it -
-    makes filter-article safe to retry without duplicating rows."""
+def delete_watchlist_matches(article_id: int) -> None:
+    """Clears prior matches for an article before reprocessing it - makes
+    tag-relevance safe to retry without duplicating rows."""
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM article_entities WHERE article_id = %s", (article_id,))
             cur.execute("DELETE FROM watchlist_matches WHERE article_id = %s", (article_id,))
-
-
-def insert_article_entities(article_id: int, entities: Iterable[dict]) -> list[dict]:
-    """entities: iterable of {text, normalized_text, label, start_char, end_char}."""
-    inserted = []
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            for ent in entities:
-                cur.execute(
-                    """
-                    INSERT INTO article_entities
-                        (article_id, entity_text, normalized_text, entity_label, start_char, end_char)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    RETURNING *
-                    """,
-                    (
-                        article_id,
-                        ent["text"],
-                        ent["normalized_text"],
-                        ent["label"],
-                        ent.get("start_char"),
-                        ent.get("end_char"),
-                    ),
-                )
-                inserted.append(cur.fetchone())
-    return inserted
 
 
 def insert_watchlist_match(
@@ -378,10 +389,13 @@ def count_matched_articles(scrape_run_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 def get_articles_needing_embedding() -> list[dict]:
+    """Every fetched article, not just watchlist-relevant ones - relevance
+    isn't decided until tag-relevance, downstream of clustering/summarizing
+    now (see that function's docstring in run_batch.py for why)."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT * FROM articles WHERE is_relevant = TRUE AND embedding IS NULL"
+                "SELECT * FROM articles WHERE fetch_status = 'fetched' AND embedding IS NULL"
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -399,14 +413,15 @@ def set_article_embedding(article_id: int, embedding: list[float]) -> None:
 # ---------------------------------------------------------------------------
 
 def get_articles_needing_clustering() -> list[dict]:
-    """Relevant, embedded articles not yet assigned to a story."""
+    """Every embedded article not yet assigned to a story - clustering runs
+    on all daily news now, not just watchlist-relevant articles."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT a.* FROM articles a
                 LEFT JOIN story_articles sa ON sa.article_id = a.id
-                WHERE a.is_relevant = TRUE AND a.embedding IS NOT NULL AND sa.id IS NULL
+                WHERE a.embedding IS NOT NULL AND sa.id IS NULL
                 """
             )
             return [dict(row) for row in cur.fetchall()]
@@ -455,11 +470,31 @@ def add_article_to_story(story_id: int, article_id: int, scrape_run_id: int) -> 
 
 
 def get_touched_story_ids(scrape_run_id: int) -> list[int]:
-    """Stories that gained a member this run - new stories and ones that grew."""
+    """Stories that gained a member this run - new stories and ones that grew.
+    tag-relevance's worklist: every touched story gets classified, regardless
+    of relevance (relevance isn't known yet)."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT DISTINCT story_id FROM story_articles WHERE scrape_run_id = %s",
+                (scrape_run_id,),
+            )
+            return [row["story_id"] for row in cur.fetchall()]
+
+
+def get_touched_relevant_story_ids(scrape_run_id: int) -> list[int]:
+    """Touched stories that tag-relevance has since marked relevant (member
+    articles' is_relevant = TRUE) - used by finalize to report the
+    watchlist-relevant subset rather than every story from every source."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT sa.story_id
+                FROM story_articles sa
+                JOIN articles a ON a.id = sa.article_id
+                WHERE sa.scrape_run_id = %s AND a.is_relevant = TRUE
+                """,
                 (scrape_run_id,),
             )
             return [row["story_id"] for row in cur.fetchall()]
@@ -487,21 +522,27 @@ def count_fetched_for_run(scrape_run_id: int) -> int:
 
 
 def get_new_story_memberships_for_run(scrape_run_id: int) -> list[dict]:
-    """This run's new story memberships - sentiment-article's worklist (one-shot
-    per article, unlike summarize-story/story-entities which redo the whole story).
-    Returns [{article_id, story_id}, ...]."""
+    """This run's new story memberships whose story has since been marked
+    relevant by tag-relevance - sentiment-article's and article-entities'
+    worklist (one-shot per article, unlike summarize-story which redoes the
+    whole story). Returns [{article_id, story_id}, ...]."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT article_id, story_id FROM story_articles WHERE scrape_run_id = %s",
+                """
+                SELECT sa.article_id, sa.story_id
+                FROM story_articles sa
+                JOIN articles a ON a.id = sa.article_id
+                WHERE sa.scrape_run_id = %s AND a.is_relevant = TRUE
+                """,
                 (scrape_run_id,),
             )
             return [dict(row) for row in cur.fetchall()]
 
 
 def get_story_articles(story_id: int) -> list[dict]:
-    """Every member article of a story, across all runs - summarize-story and
-    story-entities regenerate from the complete set, not just this run's delta."""
+    """Every member article of a story, across all runs - summarize-story
+    regenerates from the complete set, not just this run's delta."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -535,28 +576,16 @@ def upsert_story_summary(story_id: int, summary_text: str, model_name: str) -> N
             )
 
 
-# ---------------------------------------------------------------------------
-# story_entities
-# ---------------------------------------------------------------------------
-
-def delete_story_entities(story_id: int) -> None:
+def get_story_summary_text(story_id: int) -> Optional[str]:
+    """tag-relevance classifies this - the short summary, not the raw
+    combined article text - see nlp/tagging.py for why."""
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM story_entities WHERE story_id = %s", (story_id,))
-
-
-def insert_story_entities(story_id: int, entities: Iterable[dict], model_name: str) -> None:
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            for ent in entities:
-                cur.execute(
-                    """
-                    INSERT INTO story_entities
-                        (story_id, entity_text, normalized_text, entity_label, model_name)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (story_id, ent["text"], ent["normalized_text"], ent["label"], model_name),
-                )
+            cur.execute(
+                "SELECT summary_text FROM story_summaries WHERE story_id = %s", (story_id,)
+            )
+            row = cur.fetchone()
+            return row["summary_text"] if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -582,11 +611,91 @@ def upsert_article_sentiment(
 
 
 # ---------------------------------------------------------------------------
+# article_entities - one-shot NER per article (an article's own text never
+# changes once fetched, so there's nothing to redo for it)
+# ---------------------------------------------------------------------------
+
+def delete_article_entities(article_id: int) -> None:
+    """Makes article-entities safe to retry without duplicating rows - see
+    sentiment_article()/upsert_article_sentiment for why this stage's
+    worklist (new memberships of a relevant story) can hand back an article
+    it already processed on a retried task."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM article_entities WHERE article_id = %s", (article_id,))
+
+
+def insert_article_entities(article_id: int, entities: Iterable[dict]) -> None:
+    """entities: iterable of {text, normalized_text, label, start_char, end_char}
+    (nlp.ner.extract_entities' return shape)."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for ent in entities:
+                cur.execute(
+                    """
+                    INSERT INTO article_entities
+                        (article_id, entity_text, normalized_text, entity_label, start_char, end_char)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        article_id,
+                        ent["text"],
+                        ent["normalized_text"],
+                        ent["label"],
+                        ent.get("start_char"),
+                        ent.get("end_char"),
+                    ),
+                )
+
+
+def get_article_entities(article_id: int) -> dict:
+    """People/organizations/locations significant to one article, for the
+    /stories page - PERSON/ORG/{GPE,LOC} respectively (spaCy's other labels -
+    DATE, MONEY, CARDINAL, etc. - aren't shown). "Significant" filters out
+    one-off noise like a byline or an incidental aside - see
+    nlp.matching.filter_significant_entities for exactly what's kept and why."""
+    from nlp.matching import filter_significant_entities
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT entity_text, entity_label, normalized_text, start_char FROM article_entities
+                WHERE article_id = %s AND entity_label IN ('PERSON', 'ORG', 'GPE', 'LOC')
+                ORDER BY start_char
+                """,
+                (article_id,),
+            )
+            rows = cur.fetchall()
+    buckets = {"people": [], "organizations": [], "locations": []}
+    for row in rows:
+        ent = {"text": row["entity_text"], "normalized_text": row["normalized_text"], "start_char": row["start_char"]}
+        if row["entity_label"] == "PERSON":
+            buckets["people"].append(ent)
+        elif row["entity_label"] == "ORG":
+            buckets["organizations"].append(ent)
+        else:  # GPE or LOC
+            buckets["locations"].append(ent)
+    return {category: filter_significant_entities(entities) for category, entities in buckets.items()}
+
+
+# ---------------------------------------------------------------------------
 # story viewer (web page)
 # ---------------------------------------------------------------------------
 
-def get_recent_stories_with_summaries(limit: int = 50) -> list[dict]:
-    """Stories with a summary, newest-updated first, for the web viewer."""
+def get_recent_stories_with_summaries(limit: int = 50, topic: Optional[str] = None) -> list[dict]:
+    """Watchlist-relevant stories with a summary, newest-updated first, for
+    the web viewer. The HAVING clause is load-bearing, not cosmetic: every
+    touched story gets a summary now (tag-relevance runs after
+    summarize-story, not before - see run_batch.py), so without it this
+    would list every clustered story from every source, relevant or not,
+    rather than just the ones that matched something on the watchlist.
+
+    topic: an exact watchlist_entities.canonical_name to filter to (the
+    /stories page's topic filter) - applied as a WHERE/EXISTS check, not a
+    HAVING on the aggregated matched_entities array, so it narrows which
+    stories are considered (and therefore which hit the LIMIT) rather than
+    just which rows get filtered out of an already-limited set."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -601,11 +710,45 @@ def get_recent_stories_with_summaries(limit: int = 50) -> list[dict]:
                 JOIN articles a ON a.id = sa.article_id
                 LEFT JOIN watchlist_matches wm ON wm.article_id = a.id
                 LEFT JOIN watchlist_entities we ON we.id = wm.watchlist_entity_id
+                WHERE %(topic)s IS NULL OR EXISTS (
+                    SELECT 1 FROM story_articles sa2
+                    JOIN watchlist_matches wm2 ON wm2.article_id = sa2.article_id
+                    JOIN watchlist_entities we2 ON we2.id = wm2.watchlist_entity_id
+                    WHERE sa2.story_id = s.id AND we2.canonical_name = %(topic)s
+                )
                 GROUP BY s.id, s.updated_at, ss.summary_text
+                HAVING count(wm.id) > 0
                 ORDER BY s.updated_at DESC
-                LIMIT %s
+                LIMIT %(limit)s
                 """,
-                (limit,),
+                {"topic": topic, "limit": limit},
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_topic_story_counts() -> list[dict]:
+    """Every active watchlist topic with how many displayable stories (has a
+    summary, counted once even if several of its member articles matched)
+    currently match it - the /stories page's filter-pill list and counts.
+    LEFT JOINed from watchlist_entities, not an INNER JOIN from
+    watchlist_matches, so a topic with zero matches so far still appears
+    (with story_count 0) rather than silently disappearing as a filter
+    option. Queried live on every request - any watchlist entity added via
+    the API shows up here (and so on the page) on the very next load, no
+    caching or redeploy involved."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT we.canonical_name, count(DISTINCT ss.story_id) AS story_count
+                FROM watchlist_entities we
+                LEFT JOIN watchlist_matches wm ON wm.watchlist_entity_id = we.id
+                LEFT JOIN story_articles sa ON sa.article_id = wm.article_id
+                LEFT JOIN story_summaries ss ON ss.story_id = sa.story_id
+                WHERE we.is_active = TRUE
+                GROUP BY we.id, we.canonical_name
+                ORDER BY lower(we.canonical_name)
+                """
             )
             return [dict(row) for row in cur.fetchall()]
 

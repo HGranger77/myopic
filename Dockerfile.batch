@@ -9,6 +9,24 @@ RUN python -m spacy download en_core_web_sm
 RUN python -c "from transformers import pipeline; pipeline('summarization', model='sshleifer/distilbart-cnn-12-6')"
 RUN python -c "from transformers import pipeline; pipeline('sentiment-analysis', model='distilbert-base-uncased-finetuned-sst-2-english')"
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+# nlp/tagging.py - the zero-shot classifier currently wired into
+# tag-relevance. Peak RSS ~1.7GB, same size class as the other
+# pipeline(...) models above, so loading it directly (not download-only) at
+# build time is fine, unlike the Qwen LLM below.
+RUN python -c "from transformers import pipeline; pipeline('zero-shot-classification', model='facebook/bart-large-mnli')"
+# nlp/translate.py - Chinese-to-English, needed for chinanews.com.cn (see
+# config/sources.yaml). Small MarianMT model, same size class as the other
+# pipeline(...) models above.
+RUN python -c "from transformers import pipeline; pipeline('translation', model='Helsinki-NLP/opus-mt-zh-en')"
+# nlp/relevance.py - the LLM-based alternative. Kept baked in and ready even
+# though tag-relevance doesn't call it right now (see that function's
+# comment for how to switch back). Q4_K_M GGUF, not the full-precision
+# safetensors checkpoint - see nlp/relevance.py for why (fp32 needs ~6GB RAM
+# to even load, more than this project's 6GB-capped minikube VM has; this
+# quantized build runs comfortably in ~1.9GB via llama.cpp). hf_hub_download
+# just caches the one file on disk; nothing is loaded into memory at build
+# time.
+RUN python -c "from huggingface_hub import hf_hub_download; hf_hub_download('Qwen/Qwen2.5-1.5B-Instruct-GGUF', 'qwen2.5-1.5b-instruct-q4_k_m.gguf')"
 
 COPY . .
 # No single default subcommand makes sense any more (discover/filter-article/

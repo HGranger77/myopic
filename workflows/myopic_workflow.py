@@ -1,6 +1,6 @@
 """Defines the myopic pipeline as an Argo CronWorkflow, authored with Hera.
 
-Run this script to (re)generate k8s/argo-workflow.yaml:
+Run this script to (re)generate k8s/argo/argo-workflow.yaml:
 
     venv-myopic/bin/python workflows/myopic_workflow.py
 
@@ -20,6 +20,7 @@ from hera.workflows import (
     ConfigMapVolume,
     CronWorkflow,
     DAG,
+    Env,
     Parameter,
     Resources,
     RetryStrategy,
@@ -33,6 +34,11 @@ ENV_FROM = [
     ConfigMapEnvFrom(name="myopic-db-config"),
     SecretEnvFrom(name="postgres-secret"),
 ]
+# Without this, stdout is fully (not line-)buffered in a non-TTY container,
+# so the per-item progress prints in run_batch.py wouldn't show up in the
+# Argo UI's live log view until the process exits and flushes everything at
+# once - defeating their whole purpose of watching a run progress.
+ENV = [Env(name="PYTHONUNBUFFERED", value="1")]
 OUT_DIR = "/tmp/outputs"
 
 SOURCES_VOLUME = ConfigMapVolume(
@@ -71,6 +77,7 @@ with CronWorkflow(
         image=IMAGE,
         image_pull_policy="Never",
         command=["python", "run_batch.py", "start-run", "--out-dir", OUT_DIR],
+        env=ENV,
         env_from=ENV_FROM,
         outputs=[Parameter(name="run-id", value_from=ValueFrom(path=f"{OUT_DIR}/run_id"))],
         resources=Resources(cpu_request="50m", cpu_limit="200m", memory_request="64Mi", memory_limit="128Mi"),
@@ -86,6 +93,7 @@ with CronWorkflow(
             "--source", "{{inputs.parameters.source}}",
         ],
         inputs=[Parameter(name="run-id"), Parameter(name="source")],
+        env=ENV,
         env_from=ENV_FROM,
         volumes=[SOURCES_VOLUME],
         retry_strategy=RetryStrategy(limit="2"),
@@ -97,18 +105,29 @@ with CronWorkflow(
         image=IMAGE,
         image_pull_policy="Never",
         command=["python", "run_batch.py", "fetch-article-bodies"],
+        env=ENV,
         env_from=ENV_FROM,
         resources=Resources(cpu_request="300m", cpu_limit="1", memory_request="256Mi", memory_limit="512Mi"),
     )
 
-    filter_article = Container(
-        name="filter-article",
+    translate_article = Container(
+        name="translate-article",
         image=IMAGE,
         image_pull_policy="Never",
-        command=["python", "run_batch.py", "filter-article", "--run-id", "{{inputs.parameters.run-id}}"],
-        inputs=[Parameter(name="run-id")],
+        command=["python", "run_batch.py", "translate-article"],
+        env=ENV,
         env_from=ENV_FROM,
-        resources=Resources(cpu_request="300m", cpu_limit="1", memory_request="768Mi", memory_limit="1536Mi"),
+        # Needs config/sources.yaml mounted (same as discover) to know which
+        # sources are non-English - nlp/translate.py's model only loads at
+        # all if that check finds one. cpu_limit=4 must match
+        # nlp/translate.py's _N_THREADS; runs alone in the DAG like
+        # summarize-story/tag-relevance, same reasoning for taking most of
+        # the node's cores. memory_limit=3Gi matches summarize-story, not
+        # the smaller sentiment-article/article-entities budgets - OOMKilled
+        # at 1Gi on the first live run (same generative-model size class as
+        # distilbart, underestimated the same way before actually measuring).
+        volumes=[SOURCES_VOLUME],
+        resources=Resources(cpu_request="2", cpu_limit="4", memory_request="2Gi", memory_limit="3Gi"),
     )
 
     embed_article = Container(
@@ -116,6 +135,7 @@ with CronWorkflow(
         image=IMAGE,
         image_pull_policy="Never",
         command=["python", "run_batch.py", "embed-article"],
+        env=ENV,
         env_from=ENV_FROM,
         resources=Resources(cpu_request="300m", cpu_limit="1", memory_request="512Mi", memory_limit="1Gi"),
     )
@@ -126,6 +146,7 @@ with CronWorkflow(
         image_pull_policy="Never",
         command=["python", "run_batch.py", "cluster-stories", "--run-id", "{{inputs.parameters.run-id}}"],
         inputs=[Parameter(name="run-id")],
+        env=ENV,
         env_from=ENV_FROM,
         resources=Resources(cpu_request="200m", cpu_limit="500m", memory_request="256Mi", memory_limit="512Mi"),
     )
@@ -136,8 +157,40 @@ with CronWorkflow(
         image_pull_policy="Never",
         command=["python", "run_batch.py", "summarize-story", "--run-id", "{{inputs.parameters.run-id}}"],
         inputs=[Parameter(name="run-id")],
+        env=ENV,
         env_from=ENV_FROM,
-        resources=Resources(cpu_request="500m", cpu_limit="1", memory_request="1Gi", memory_limit="2Gi"),
+        # cpu_limit=4 must match nlp/summarize.py's _N_THREADS - this task
+        # runs alone in the DAG (nothing else model-bearing runs
+        # concurrently with it), so it can safely take most of the node's
+        # cores. Bumped from 1 after the DAG reorder made this run on every
+        # clustered story instead of just the relevant few - at 1 core,
+        # distilbart still spawned PyTorch's default thread count (19,
+        # unrelated to this cpu_limit) and the resulting oversubscription
+        # made the full-volume run project to ~3.7 hours.
+        resources=Resources(cpu_request="2", cpu_limit="4", memory_request="1Gi", memory_limit="2Gi"),
+    )
+
+    tag_relevance = Container(
+        name="tag-relevance",
+        image=IMAGE,
+        image_pull_policy="Never",
+        command=["python", "run_batch.py", "tag-relevance", "--run-id", "{{inputs.parameters.run-id}}"],
+        inputs=[Parameter(name="run-id")],
+        env=ENV,
+        env_from=ENV_FROM,
+        # Currently runs nlp/tagging.py's zero-shot classifier (peak RSS
+        # ~1.7GB measured directly) against each touched story's SHORT
+        # SUMMARY, not the raw article text - see tag_relevance()'s
+        # docstring in run_batch.py for why that distinction matters, both
+        # for speed and for accuracy. nlp/relevance.py's LLM is kept wired
+        # in but disconnected and would fit the same budget if swapped back
+        # in (~1.9GB, via a quantized GGUF - its docstring explains why the
+        # unquantized fp32 checkpoint, ~6GB, was rejected). cpu_limit=4 must
+        # match whichever module's own _N_THREADS is active - this task
+        # runs alone in the DAG (nothing else model-bearing runs
+        # concurrently with it), so it can safely take most of the node's
+        # cores for its duration without starving anything else.
+        resources=Resources(cpu_request="2", cpu_limit="4", memory_request="2Gi", memory_limit="3Gi"),
     )
 
     sentiment_article = Container(
@@ -146,18 +199,25 @@ with CronWorkflow(
         image_pull_policy="Never",
         command=["python", "run_batch.py", "sentiment-article", "--run-id", "{{inputs.parameters.run-id}}"],
         inputs=[Parameter(name="run-id")],
+        env=ENV,
         env_from=ENV_FROM,
-        resources=Resources(cpu_request="300m", cpu_limit="1", memory_request="512Mi", memory_limit="1Gi"),
+        # cpu_limit=2 must match nlp/sentiment.py's _N_THREADS. Lower than
+        # summarize-story/tag-relevance's 4 since this runs CONCURRENTLY
+        # with article-entities (both depend on tag-relevance), not alone.
+        resources=Resources(cpu_request="1", cpu_limit="2", memory_request="512Mi", memory_limit="1Gi"),
     )
 
-    story_entities = Container(
-        name="story-entities",
+    article_entities = Container(
+        name="article-entities",
         image=IMAGE,
         image_pull_policy="Never",
-        command=["python", "run_batch.py", "story-entities", "--run-id", "{{inputs.parameters.run-id}}"],
+        command=["python", "run_batch.py", "article-entities", "--run-id", "{{inputs.parameters.run-id}}"],
         inputs=[Parameter(name="run-id")],
+        env=ENV,
         env_from=ENV_FROM,
-        resources=Resources(cpu_request="300m", cpu_limit="1", memory_request="768Mi", memory_limit="1536Mi"),
+        # spaCy NER over one article's own body text. Runs CONCURRENTLY with
+        # sentiment-article (both depend on tag-relevance), not alone.
+        resources=Resources(cpu_request="200m", cpu_limit="500m", memory_request="512Mi", memory_limit="768Mi"),
     )
 
     finalize = Container(
@@ -166,6 +226,7 @@ with CronWorkflow(
         image_pull_policy="Never",
         command=["python", "run_batch.py", "finalize", "--run-id", "{{inputs.parameters.run-id}}"],
         inputs=[Parameter(name="run-id")],
+        env=ENV,
         env_from=ENV_FROM,
         resources=Resources(cpu_request="100m", cpu_limit="300m", memory_request="128Mi", memory_limit="256Mi"),
     )
@@ -183,24 +244,27 @@ with CronWorkflow(
 
         fab = fetch_article_bodies(name="fetch-article-bodies", dependencies=["discover"])
 
-        fa = filter_article(name="filter-article", arguments=_run_id_arg(), dependencies=["fetch-article-bodies"])
+        ta = translate_article(name="translate-article", dependencies=["fetch-article-bodies"])
 
-        ea = embed_article(name="embed-article", dependencies=["filter-article"])
+        ea = embed_article(name="embed-article", dependencies=["translate-article"])
 
         cs = cluster_stories(name="cluster-stories", arguments=_run_id_arg(), dependencies=["embed-article"])
 
         ss = summarize_story(name="summarize-story", arguments=_run_id_arg(), dependencies=["cluster-stories"])
-        sa = sentiment_article(name="sentiment-article", arguments=_run_id_arg(), dependencies=["cluster-stories"])
-        se = story_entities(name="story-entities", arguments=_run_id_arg(), dependencies=["cluster-stories"])
+
+        tr = tag_relevance(name="tag-relevance", arguments=_run_id_arg(), dependencies=["summarize-story"])
+
+        sa = sentiment_article(name="sentiment-article", arguments=_run_id_arg(), dependencies=["tag-relevance"])
+        ae = article_entities(name="article-entities", arguments=_run_id_arg(), dependencies=["tag-relevance"])
 
         fin = finalize(
             name="finalize",
             arguments=_run_id_arg(),
-            dependencies=["summarize-story", "sentiment-article", "story-entities"],
+            dependencies=["sentiment-article", "article-entities"],
         )
 
 
 if __name__ == "__main__":
-    out_path = Path(__file__).parent.parent / "k8s" / "argo-workflow.yaml"
+    out_path = Path(__file__).parent.parent / "k8s" / "argo" / "argo-workflow.yaml"
     out_path.write_text(w.to_yaml())
     print(f"wrote {out_path}")

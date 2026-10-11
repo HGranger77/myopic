@@ -8,8 +8,11 @@ every later DAG stage) needs to change, since they all key off the source
 name, not its implementation.
 """
 from scraper import abc_news
+from scraper import aljazeera
 from scraper import article as nine_com_au_article
+from scraper import chinanews
 from scraper import front_page as nine_com_au_front_page
+from scraper import news_com_au
 
 SOURCES = {
     "nine_com_au": {
@@ -19,6 +22,18 @@ SOURCES = {
     "abc_net_au": {
         "extract_headlines": abc_news.extract_headlines,
         "extract_body": abc_news.extract_body,
+    },
+    "aljazeera": {
+        "extract_headlines": aljazeera.extract_headlines,
+        "extract_body": aljazeera.extract_body,
+    },
+    "news_com_au": {
+        "extract_headlines": news_com_au.extract_headlines,
+        "extract_body": news_com_au.extract_body,
+    },
+    "chinanews": {
+        "extract_headlines": chinanews.extract_headlines,
+        "extract_body": chinanews.extract_body,
     },
 }
 

@@ -7,7 +7,6 @@ from database import get_connection, init_db  # noqa: E402
 
 _TABLES = [
     "article_sentiment",
-    "story_entities",
     "story_summaries",
     "story_articles",
     "stories",

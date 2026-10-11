@@ -51,7 +51,16 @@ CREATE TABLE IF NOT EXISTS articles (
     fetch_status       TEXT NOT NULL DEFAULT 'pending'
                        CHECK (fetch_status IN ('pending', 'fetched', 'failed')),
     fetch_error        TEXT,
-    -- filled in by filter-article: does this article match a topic of interest at all?
+    -- translate-article's originals, for a non-English source (see
+    -- config/sources.yaml's per-source `language`) - NULL for English
+    -- sources, where headline/body_text already ARE the original. Kept
+    -- separately rather than overwritten so the original text isn't lost -
+    -- every English-only stage downstream (embed, summarize, sentiment,
+    -- NER, tag-relevance) reads headline/body_text either way, translated
+    -- or not, and doesn't need to know the difference.
+    original_headline  TEXT,
+    original_body_text TEXT,
+    -- filled in by tag-relevance: does this article's story match a topic of interest at all?
     is_relevant        BOOLEAN,
     -- filled in by embed-article; all-MiniLM-L6-v2 (see nlp/embedding.py)
     embedding          vector(384),
@@ -67,6 +76,10 @@ CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source);
 CREATE INDEX IF NOT EXISTS idx_articles_embedding ON articles
     USING hnsw (embedding vector_cosine_ops);
 
+-- Filled in once per article (like article_sentiment, not redone on every
+-- run) by the article-entities stage - a fresh NER pass over just that one
+-- article's own text. Powers the per-source entity breakdown on the
+-- /stories page.
 CREATE TABLE IF NOT EXISTS article_entities (
     id               SERIAL PRIMARY KEY,
     article_id       INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
@@ -125,21 +138,6 @@ CREATE TABLE IF NOT EXISTS story_summaries (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
--- Also regenerated per touched story (deleted + reinserted, like
--- article_entities), from a fresh NER pass over every source article's
--- combined text - deliberately not just an aggregation of article_entities,
--- since combining sources can surface entities no single article emphasized.
-CREATE TABLE IF NOT EXISTS story_entities (
-    id               SERIAL PRIMARY KEY,
-    story_id         INTEGER NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
-    entity_text      TEXT NOT NULL,
-    normalized_text  TEXT NOT NULL,
-    entity_label     TEXT NOT NULL,
-    model_name       TEXT NOT NULL,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_story_entities_story ON story_entities(story_id);
 
 -- One-shot per article (not regenerated when a story grows) - this is each
 -- source's own framing of the story, so an existing member's sentiment

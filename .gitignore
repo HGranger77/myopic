@@ -161,8 +161,8 @@ env.bak/
 venv.bak/
 
 # myopic project-specific
-k8s/secret.yaml
-k8s/grafana-secret-values.yaml
+k8s/shared/secret.yaml
+k8s/monitoring/grafana-secret-values.yaml
 
 # Spyder project settings
 .spyderproject

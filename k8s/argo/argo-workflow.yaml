@@ -25,6 +25,9 @@ spec:
         - start-run
         - --out-dir
         - /tmp/outputs
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -58,6 +61,9 @@ spec:
         - '{{inputs.parameters.run-id}}'
         - --source
         - '{{inputs.parameters.source}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -88,6 +94,9 @@ spec:
         - python
         - run_batch.py
         - fetch-article-bodies
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -100,31 +109,37 @@ spec:
           requests:
             cpu: 300m
             memory: 256Mi
-    - name: filter-article
+    - name: translate-article
+      volumes:
+      - name: myopic-sources
+        configMap:
+          name: myopic-sources
       container:
         image: myopic-batch:latest
         imagePullPolicy: Never
         command:
         - python
         - run_batch.py
-        - filter-article
-        - --run-id
-        - '{{inputs.parameters.run-id}}'
+        - translate-article
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
         - secretRef:
             name: postgres-secret
+        volumeMounts:
+        - name: myopic-sources
+          mountPath: /app/config/sources.yaml
+          subPath: sources.yaml
         resources:
           limits:
-            cpu: '1'
-            memory: 1536Mi
+            cpu: '4'
+            memory: 3Gi
           requests:
-            cpu: 300m
-            memory: 768Mi
-      inputs:
-        parameters:
-        - name: run-id
+            cpu: '2'
+            memory: 2Gi
     - name: embed-article
       container:
         image: myopic-batch:latest
@@ -133,6 +148,9 @@ spec:
         - python
         - run_batch.py
         - embed-article
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -155,6 +173,9 @@ spec:
         - cluster-stories
         - --run-id
         - '{{inputs.parameters.run-id}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -180,6 +201,9 @@ spec:
         - summarize-story
         - --run-id
         - '{{inputs.parameters.run-id}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -187,11 +211,39 @@ spec:
             name: postgres-secret
         resources:
           limits:
-            cpu: '1'
+            cpu: '4'
             memory: 2Gi
           requests:
-            cpu: 500m
+            cpu: '2'
             memory: 1Gi
+      inputs:
+        parameters:
+        - name: run-id
+    - name: tag-relevance
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - tag-relevance
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: '4'
+            memory: 3Gi
+          requests:
+            cpu: '2'
+            memory: 2Gi
       inputs:
         parameters:
         - name: run-id
@@ -205,6 +257,9 @@ spec:
         - sentiment-article
         - --run-id
         - '{{inputs.parameters.run-id}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -212,24 +267,27 @@ spec:
             name: postgres-secret
         resources:
           limits:
-            cpu: '1'
+            cpu: '2'
             memory: 1Gi
           requests:
-            cpu: 300m
+            cpu: '1'
             memory: 512Mi
       inputs:
         parameters:
         - name: run-id
-    - name: story-entities
+    - name: article-entities
       container:
         image: myopic-batch:latest
         imagePullPolicy: Never
         command:
         - python
         - run_batch.py
-        - story-entities
+        - article-entities
         - --run-id
         - '{{inputs.parameters.run-id}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -237,11 +295,11 @@ spec:
             name: postgres-secret
         resources:
           limits:
-            cpu: '1'
-            memory: 1536Mi
-          requests:
-            cpu: 300m
+            cpu: 500m
             memory: 768Mi
+          requests:
+            cpu: 200m
+            memory: 512Mi
       inputs:
         parameters:
         - name: run-id
@@ -255,6 +313,9 @@ spec:
         - finalize
         - --run-id
         - '{{inputs.parameters.run-id}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
         envFrom:
         - configMapRef:
             name: myopic-db-config
@@ -282,6 +343,9 @@ spec:
           withItems:
           - nine_com_au
           - abc_net_au
+          - aljazeera
+          - news_com_au
+          - chinanews
           arguments:
             parameters:
             - name: run-id
@@ -294,18 +358,14 @@ spec:
           template: fetch-article-bodies
           dependencies:
           - discover
-        - name: filter-article
-          template: filter-article
+        - name: translate-article
+          template: translate-article
           dependencies:
           - fetch-article-bodies
-          arguments:
-            parameters:
-            - name: run-id
-              value: '{{tasks.start-run.outputs.parameters.run-id}}'
         - name: embed-article
           template: embed-article
           dependencies:
-          - filter-article
+          - translate-article
         - name: cluster-stories
           template: cluster-stories
           dependencies:
@@ -322,18 +382,26 @@ spec:
             parameters:
             - name: run-id
               value: '{{tasks.start-run.outputs.parameters.run-id}}'
-        - name: sentiment-article
-          template: sentiment-article
+        - name: tag-relevance
+          template: tag-relevance
           dependencies:
-          - cluster-stories
+          - summarize-story
           arguments:
             parameters:
             - name: run-id
               value: '{{tasks.start-run.outputs.parameters.run-id}}'
-        - name: story-entities
-          template: story-entities
+        - name: sentiment-article
+          template: sentiment-article
           dependencies:
-          - cluster-stories
+          - tag-relevance
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
+        - name: article-entities
+          template: article-entities
+          dependencies:
+          - tag-relevance
           arguments:
             parameters:
             - name: run-id
@@ -341,9 +409,8 @@ spec:
         - name: finalize
           template: finalize
           dependencies:
-          - summarize-story
           - sentiment-article
-          - story-entities
+          - article-entities
           arguments:
             parameters:
             - name: run-id

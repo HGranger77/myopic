@@ -6,6 +6,18 @@ lxml>=5.0
 spacy>=3.7
 transformers==4.44.2
 sentence-transformers==3.0.1
+# nlp/translate.py's MarianMT tokenizer (Helsinki-NLP/opus-mt-zh-en) needs
+# sentencepiece to load at all; sacremoses is "recommended" by transformers
+# for correct MarianTokenizer detokenization, not strictly required, but
+# cheap to include and avoids a startup warning every run.
+sentencepiece>=0.2
+sacremoses>=0.1
+# prebuilt CPU wheel for llama-cpp-python - python:3.11-slim has no
+# compiler/cmake, and llama-cpp-python has no plain-PyPI wheel for this
+# platform, so without this it tries (and fails) to build from source.
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.3.36
+huggingface_hub>=0.21.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.4.1
 psycopg2-binary>=2.9

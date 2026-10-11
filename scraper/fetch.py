@@ -29,6 +29,15 @@ def get_session() -> requests.Session:
 def get(url: str, timeout: int = 15) -> str:
     response = get_session().get(url, timeout=timeout)
     response.raise_for_status()
+    # requests falls back to ISO-8859-1 (the old RFC default) whenever a
+    # server's Content-Type header omits a charset - chinanews.com.cn does
+    # exactly that, and requests ignores the page's own <meta charset=
+    # "UTF-8"> entirely, silently mangling every non-ASCII character into
+    # double-encoded garbage. Invisible on every English/ASCII source (ASCII
+    # round-trips identically through either encoding), which is why this
+    # went unnoticed until the first non-English source. apparent_encoding
+    # sniffs the actual bytes instead of trusting the header.
+    response.encoding = response.apparent_encoding
     return response.text
 
 

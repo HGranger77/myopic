@@ -17,6 +17,9 @@
     --border: #e4e4e0;
     --pos-bg: #e3f3e6; --pos-text: #1f7a3a;
     --neg-bg: #fbe7e6; --neg-text: #b23b32;
+    --person-bg: #fdf0db; --person-text: #966d1f;
+    --org-bg: #eee3fb; --org-text: #6b3fb8;
+    --location-bg: #dff3f1; --location-text: #1c7f73;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -30,6 +33,9 @@
       --border: #2d2e34;
       --pos-bg: #1c3324; --pos-text: #7fd999;
       --neg-bg: #3a2220; --neg-text: #e9948c;
+      --person-bg: #3a3020; --person-text: #e3bf6f;
+      --org-bg: #2f2640; --org-text: #c6a6f5;
+      --location-bg: #1c3330; --location-text: #7fd6c7;
     }
   }
   * { box-sizing: border-box; }
@@ -62,14 +68,30 @@
     padding: 1.25rem 1.4rem;
     margin-bottom: 1.1rem;
   }
-  .meta {
+  .story-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+  .story-title {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+  .story-date {
+    flex-shrink: 0;
+    font-size: 0.78rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .tags {
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
-    align-items: center;
     margin-bottom: 0.7rem;
-    font-size: 0.8rem;
-    color: var(--muted);
   }
   .badge {
     display: inline-block;
@@ -91,6 +113,30 @@
     gap: 0.4rem;
     border-top: 1px solid var(--border);
     padding-top: 0.7rem;
+  }
+  .sources summary {
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--muted);
+    list-style: none;
+  }
+  .sources summary::-webkit-details-marker { display: none; }
+  .sources summary::before { content: "▸ "; }
+  .sources[open] summary::before { content: "▾ "; }
+  .common-entities {
+    margin-bottom: 0.9rem;
+  }
+  .entities-label {
+    display: block;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin-bottom: 0.35rem;
+  }
+  .common-entities .entities {
+    padding-left: 0;
   }
   .source-row {
     display: flex;
@@ -121,10 +167,53 @@
   }
   .sentiment.positive { background: var(--pos-bg); color: var(--pos-text); }
   .sentiment.negative { background: var(--neg-bg); color: var(--neg-text); }
+  .source-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .entities {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    padding-left: 7.5rem;
+  }
+  .entity-tag {
+    font-size: 0.7rem;
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+  }
+  .entity-tag.person { background: var(--person-bg); color: var(--person-text); }
+  .entity-tag.org { background: var(--org-bg); color: var(--org-text); }
+  .entity-tag.location { background: var(--location-bg); color: var(--location-text); }
   .empty {
     color: var(--muted);
     padding: 3rem 0;
     text-align: center;
+  }
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 1.75rem;
+  }
+  .filter-pill {
+    display: inline-block;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.82rem;
+    color: var(--text);
+    text-decoration: none;
+  }
+  .filter-pill:hover {
+    border-color: var(--accent);
+  }
+  .filter-pill.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
   }
 </style>
 </head>
@@ -135,31 +224,69 @@
     <p>Topics of interest, clustered across sources and summarized locally.</p>
   </header>
 
+  <div class="filters">
+    <a class="filter-pill{{ ' active' if not selected_topic }}" href="/stories">All</a>
+    {% for t in topics %}
+    <a class="filter-pill{{ ' active' if t.name == selected_topic }}" href="/stories?topic={{ t.name|urlencode }}">{{ t.display_name }} ({{ t.count }})</a>
+    {% endfor %}
+  </div>
+
   {% if stories %}
     {% for story in stories %}
     <article class="story">
-      <div class="meta">
-        <span>{{ story.updated_at.strftime('%d %b %Y, %H:%M') }}</span>
-        {% for entity in story.matched_entities if entity %}
+      <div class="story-header">
+        <h2 class="story-title">
+          {{ story.source_articles[0].headline if story.source_articles else "Untitled story" }}
+        </h2>
+        <span class="story-date">{{ story.updated_at.strftime('%d %b %Y, %H:%M') }}</span>
+      </div>
+      <div class="tags">
+        {% for entity in story.matched_entities %}
         <span class="badge">{{ entity }}</span>
         {% endfor %}
       </div>
       <p class="summary">{{ story.summary_text }}</p>
-      <div class="sources">
+      {% if story.common_entities.people or story.common_entities.organizations or story.common_entities.locations %}
+      <div class="common-entities">
+        <span class="entities-label">Common to all sources</span>
+        <div class="entities">
+          {% for p in story.common_entities.people %}<span class="entity-tag person">{{ p }}</span>{% endfor %}
+          {% for o in story.common_entities.organizations %}<span class="entity-tag org">{{ o }}</span>{% endfor %}
+          {% for l in story.common_entities.locations %}<span class="entity-tag location">{{ l }}</span>{% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      <details class="sources">
+        <summary>{{ story.source_articles|length }} source{{ "s" if story.source_articles|length != 1 else "" }}</summary>
         {% for article in story.source_articles %}
-        <div class="source-row">
-          <span class="source-tag">{{ article.source }}</span>
-          <a href="{{ article.url }}" target="_blank" rel="noopener">{{ article.headline }}</a>
-          {% if article.sentiment_label %}
-          <span class="sentiment {{ article.sentiment_label|lower }}">{{ article.sentiment_label }}</span>
+        <div class="source-item">
+          <div class="source-row">
+            <span class="source-tag">{{ article.source }}</span>
+            <a href="{{ article.url }}" target="_blank" rel="noopener">{{ article.headline }}</a>
+            {% if article.sentiment_label %}
+            <span class="sentiment {{ article.sentiment_label|lower }}">{{ article.sentiment_label }}</span>
+            {% endif %}
+          </div>
+          {% if article.entities.people or article.entities.organizations or article.entities.locations %}
+          <div class="entities">
+            {% for p in article.entities.people %}<span class="entity-tag person">{{ p }}</span>{% endfor %}
+            {% for o in article.entities.organizations %}<span class="entity-tag org">{{ o }}</span>{% endfor %}
+            {% for l in article.entities.locations %}<span class="entity-tag location">{{ l }}</span>{% endfor %}
+          </div>
           {% endif %}
         </div>
         {% endfor %}
-      </div>
+      </details>
     </article>
     {% endfor %}
   {% else %}
-    <p class="empty">No reportable stories yet — nothing scraped so far has matched the watchlist.</p>
+    <p class="empty">
+      {% if selected_topic %}
+        No stories matching "{{ selected_topic_display }}" yet.
+      {% else %}
+        No reportable stories yet — nothing scraped so far has matched the watchlist.
+      {% endif %}
+    </p>
   {% endif %}
 </div>
 </body>

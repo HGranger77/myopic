@@ -23,3 +23,26 @@ sources:
     front_pages:
       - slug: "home"
         path: "/"
+  - name: "Al Jazeera"
+    module: "aljazeera"
+    base_url: "https://www.aljazeera.com"
+    front_pages:
+      - slug: "home"
+        path: "/"
+  - name: "news.com.au"
+    module: "news_com_au"
+    base_url: "https://www.news.com.au"
+    front_pages:
+      - slug: "home"
+        path: "/"
+  - name: "China News"
+    module: "chinanews"
+    base_url: "https://www.chinanews.com.cn"
+    # Every other source defaults to "en" (see run_batch.py's translate_article,
+    # which only loads nlp/translate.py's model at all if some configured
+    # source declares a non-"en" language) - this is the first source that
+    # needs the field set.
+    language: "zh"
+    front_pages:
+      - slug: "home"
+        path: "/"
