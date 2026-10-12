@@ -4,7 +4,10 @@ COPY requirements-batch.txt .
 RUN pip install --no-cache-dir -r requirements-batch.txt
 
 # Bake every model's weights into the image so no stage ever needs internet
-# access beyond the news sites themselves.
+# access beyond the news sites themselves. Append new RUN lines at the END
+# of this block, never insert in the middle - Docker's layer cache is
+# strictly sequential, so an insertion busts the cache (and forces a
+# re-download) for every model listed after it, not just the new one.
 RUN python -m spacy download en_core_web_sm
 RUN python -c "from transformers import pipeline; pipeline('summarization', model='sshleifer/distilbart-cnn-12-6')"
 RUN python -c "from transformers import pipeline; pipeline('sentiment-analysis', model='distilbert-base-uncased-finetuned-sst-2-english')"
@@ -12,21 +15,28 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 # nlp/tagging.py - the zero-shot classifier currently wired into
 # tag-relevance. Peak RSS ~1.7GB, same size class as the other
 # pipeline(...) models above, so loading it directly (not download-only) at
-# build time is fine, unlike the Qwen LLM below.
+# build time is fine.
 RUN python -c "from transformers import pipeline; pipeline('zero-shot-classification', model='facebook/bart-large-mnli')"
 # nlp/translate.py - Chinese-to-English, needed for chinanews.com.cn (see
 # config/sources.yaml). Small MarianMT model, same size class as the other
 # pipeline(...) models above.
 RUN python -c "from transformers import pipeline; pipeline('translation', model='Helsinki-NLP/opus-mt-zh-en')"
-# nlp/relevance.py - the LLM-based alternative. Kept baked in and ready even
-# though tag-relevance doesn't call it right now (see that function's
-# comment for how to switch back). Q4_K_M GGUF, not the full-precision
-# safetensors checkpoint - see nlp/relevance.py for why (fp32 needs ~6GB RAM
-# to even load, more than this project's 6GB-capped minikube VM has; this
-# quantized build runs comfortably in ~1.9GB via llama.cpp). hf_hub_download
-# just caches the one file on disk; nothing is loaded into memory at build
-# time.
-RUN python -c "from huggingface_hub import hf_hub_download; hf_hub_download('Qwen/Qwen2.5-1.5B-Instruct-GGUF', 'qwen2.5-1.5b-instruct-q4_k_m.gguf')"
+# nlp/emotion.py - runs alongside sentiment in the same sentiment-article
+# stage/pod (anger/disgust/fear/joy/neutral/sadness/surprise, shown next to
+# the POSITIVE/NEGATIVE badge). Same size class as the other pipeline(...)
+# models here.
+RUN python -c "from transformers import pipeline; pipeline('text-classification', model='j-hartmann/emotion-english-distilroberta-base')"
+# nlp/relevance.py - the LLM-based relevance alternative - is NOT baked in.
+# tag-relevance doesn't call it (nlp.tagging's zero-shot classifier is
+# wired in instead - see that function's comment for how to switch back),
+# so downloading its ~1.9GB Q4_K_M GGUF on every build was pure waste. Its
+# hf_hub_download call is lazy (only runs the first time something actually
+# calls into that module), so nothing breaks by skipping this here - it'll
+# just need a real network fetch the first time someone re-enables it.
+# nlp/entity_sentiment.py - aspect-based sentiment scoped to each
+# significant entity (see entity-sentiment stage), not the whole article.
+# DeBERTa-v3-base, same size class as the other pipeline(...) models here.
+RUN python -c "from transformers import pipeline; pipeline('text-classification', model='yangheng/deberta-v3-base-absa-v1.1')"
 
 COPY . .
 # No single default subcommand makes sense any more (discover/filter-article/

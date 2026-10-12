@@ -136,6 +136,21 @@ def stories_page(
         story["source_articles"] = ops.get_story_source_articles(story["story_id"])
         for article in story["source_articles"]:
             article["entities"] = ops.get_article_entities(article["id"])
+            # Per-entity aspect-based sentiment (nlp/entity_sentiment.py) -
+            # mirrors entities' {category: [text, ...]} shape as
+            # {category: {text: label_or_None}} so the template can look up
+            # one entity tag's sentiment without any Jinja method-calling
+            # gymnastics. None for an entity entity-sentiment hasn't scored
+            # yet (e.g. a run between article-entities and entity-sentiment
+            # completing).
+            entity_sentiment_lookup = ops.get_article_entity_sentiment(article["id"])
+            article["entity_sentiment"] = {
+                category: {
+                    text: entity_sentiment_lookup.get((category, text.lower()), {}).get("label")
+                    for text in texts
+                }
+                for category, texts in article["entities"].items()
+            }
         story["common_entities"] = _common_entities(story["source_articles"])
     # Queried live, every request - any watchlist entity added via the API
     # shows up here (alphabetically, by canonical_name, with a live match
