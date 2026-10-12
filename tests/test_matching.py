@@ -76,6 +76,33 @@ def test_significance_does_not_merge_unrelated_entities():
     assert filter_significant_entities(entities) == ["Joe Biden"]
 
 
+def test_significance_ambiguous_short_mention_credited_to_neither():
+    # real case: "Guo Wu" (owner) and "Santiago Wu" (his son) each mentioned
+    # once, then "the Wu family" later - a genuine collective reference that
+    # could belong to either. Crediting that bare "Wu" to whichever name
+    # happened to be seen first is an arbitrary guess, so it should count
+    # toward neither - both stay at their true count of 1, both late
+    # (>= 200), so both are dropped rather than one surviving by accident.
+    entities = [
+        _entity("Guo Wu", 298),
+        _entity("Santiago Wu", 414),
+        _entity("Wu", 964),
+    ]
+    assert filter_significant_entities(entities) == []
+
+
+def test_significance_ambiguous_mention_does_not_block_a_real_second_mention():
+    # the ambiguous "Wu" is skipped entirely, but a genuine second mention
+    # of one specific person still counts normally
+    entities = [
+        _entity("Guo Wu", 298),
+        _entity("Santiago Wu", 414),
+        _entity("Wu", 964),  # ambiguous - credited to neither
+        _entity("Guo Wu", 1200),  # unambiguous second mention of Guo Wu
+    ]
+    assert filter_significant_entities(entities) == ["Guo Wu"]
+
+
 def test_significance_orders_by_first_mention():
     entities = [_entity("Second", 5), _entity("Second", 6), _entity("First", 1), _entity("First", 2)]
     assert filter_significant_entities(entities) == ["First", "Second"]

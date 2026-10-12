@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS articles (
     is_relevant        BOOLEAN,
     -- filled in by embed-article; all-MiniLM-L6-v2 (see nlp/embedding.py)
     embedding          vector(384),
+    -- Stamped by article-entities whenever it runs NER on this article,
+    -- regardless of how many entities (if any) were found - NOT the same
+    -- as "has article_entities rows". article-entities' worklist is
+    -- "relevant AND entities_checked_at IS NULL", not "relevant AND no
+    -- article_entities rows exist": a NOT-EXISTS-on-article_entities check
+    -- can't tell "never processed" apart from "processed, found zero
+    -- entities" (common for short articles, and for every untranslated
+    -- Chinese article NER was mistakenly run on before translate-article
+    -- gated it - see get_articles_needing_embedding's docstring), so that
+    -- version kept reprocessing the same zero-entity articles every run.
+    entities_checked_at TIMESTAMPTZ,
     first_seen_run_id  INTEGER REFERENCES scrape_runs(id),
     last_seen_run_id   INTEGER REFERENCES scrape_runs(id),
     discovered_at      TIMESTAMPTZ NOT NULL DEFAULT now(),

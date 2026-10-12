@@ -93,7 +93,9 @@ def test_stories_page_source_breakdown_is_collapsible_dropdown():
     assert "<summary>1 source</summary>" in resp.text
 
 
-def test_stories_page_common_entities_shown_outside_dropdown_only_when_shared_by_all_sources():
+def test_stories_page_common_entities_two_sources_requires_both():
+    # for exactly 2 sources, "more than half" still means both - same
+    # behavior as the old strict-intersection rule for small stories
     story_id, article_id = _seed_matched_story(url="https://www.nine.com.au/world-news/biden-story.html")
     ops.insert_article_entities(article_id, [
         {"text": "Joe Biden", "normalized_text": "joe biden", "label": "PERSON", "start_char": 0, "end_char": 9},
@@ -121,6 +123,34 @@ def test_stories_page_common_entities_shown_outside_dropdown_only_when_shared_by
     assert "Joe Biden" in common_section
     assert "White House" not in common_section
     assert "Canberra" not in common_section
+
+
+def test_stories_page_common_entities_use_majority_not_strict_intersection():
+    # 5 total sources: "Jane Smith" is mentioned by 3 of them (a majority -
+    # should show), "Rare Person" by only 2 (not a majority - should not).
+    # A strict "every single source" rule would have hidden both.
+    story_id, first_article_id = _seed_matched_story(url="https://www.nine.com.au/world-news/majority-a.html")
+    ops.insert_article_entities(first_article_id, [
+        {"text": "Jane Smith", "normalized_text": "jane smith", "label": "PERSON", "start_char": 0, "end_char": 10},
+    ])
+
+    per_source_names = ["Jane Smith", "Jane Smith", "Rare Person", "Rare Person"]
+    run_id = ops.create_scrape_run()
+    for i, name in enumerate(per_source_names, start=2):
+        article_id, _ = ops.upsert_article(
+            "nine_com_au", f"https://www.nine.com.au/world-news/majority-{i}.html", f"Source {i}", "world-news", run_id,
+        )
+        ops.mark_article_fetched(article_id, "body")
+        ops.add_article_to_story(story_id, article_id, run_id)
+        ops.insert_article_entities(article_id, [
+            {"text": name, "normalized_text": name.lower(), "label": "PERSON", "start_char": 0, "end_char": len(name)},
+        ])
+
+    resp = client.get("/stories")
+    assert resp.status_code == 200
+    common_section = resp.text.split('class="common-entities"')[1].split('<details class="sources">')[0]
+    assert "Jane Smith" in common_section
+    assert "Rare Person" not in common_section
 
 
 def test_stories_page_topic_filter_shows_only_matching_story():
@@ -192,3 +222,131 @@ def test_stories_page_escapes_html_in_scraped_content():
     assert resp.status_code == 200
     assert "<script>" not in resp.text
     assert "&lt;script&gt;" in resp.text
+
+
+def _seed_n_stories(n, entity_id, entity_name, url_prefix):
+    story_ids = []
+    for i in range(n):
+        run_id = ops.create_scrape_run()
+        article_id, _ = ops.upsert_article(
+            "nine_com_au", f"{url_prefix}-{i}.html", f"Story {i}", "world-news", run_id,
+        )
+        ops.mark_article_fetched(article_id, "Some policy content.")
+        ops.insert_watchlist_match(article_id, entity_id, None, entity_name.lower(), run_id)
+        story_id = ops.create_story()
+        ops.add_article_to_story(story_id, article_id, run_id)
+        ops.upsert_story_summary(story_id, f"Summary {i}.", "test-model")
+        story_ids.append(story_id)
+    return story_ids
+
+
+def test_stories_page_pagination_splits_across_pages():
+    from routers.stories import PAGE_SIZE
+
+    entity = ops.create_watchlist_entity("Joe Biden")
+    _seed_n_stories(PAGE_SIZE + 1, entity["id"], "Joe Biden", "https://www.nine.com.au/world-news/page-story")
+
+    resp = client.get("/stories")
+    assert resp.status_code == 200
+    assert "Page 1 of 2" in resp.text
+    assert resp.text.count('<article class="story">') == PAGE_SIZE
+
+    resp2 = client.get("/stories?page=2")
+    assert resp2.status_code == 200
+    assert "Page 2 of 2" in resp2.text
+    assert resp2.text.count('<article class="story">') == 1
+
+
+def test_stories_page_date_filter_shows_only_that_day():
+    entity = ops.create_watchlist_entity("Joe Biden")
+    old_story_id, new_story_id = _seed_n_stories(
+        2, entity["id"], "Joe Biden", "https://www.nine.com.au/world-news/date-story"
+    )
+    with ops.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-01-01 10:00:00+00", old_story_id))
+
+    resp = client.get("/stories?date=2026-01-01")
+    assert resp.status_code == 200
+    assert resp.text.count('<article class="story">') == 1
+    assert "Summary 0." in resp.text
+    assert "Summary 1." not in resp.text
+    assert "Showing stories updated on" in resp.text
+
+
+def test_stories_page_calendar_highlights_days_with_content():
+    entity = ops.create_watchlist_entity("Joe Biden")
+    (story_id,) = _seed_n_stories(1, entity["id"], "Joe Biden", "https://www.nine.com.au/world-news/cal-story")
+    with ops.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-01-15 10:00:00+00", story_id))
+
+    resp = client.get("/stories?calendar_month=2026-01")
+    assert resp.status_code == 200
+    assert "January 2026" in resp.text
+    assert 'href="/stories?date=2026-01-15"' in resp.text  # clickable - has content
+    assert '<span class="calendar-day">14</span>' in resp.text  # other days still render, just not as links
+
+
+def test_stories_page_search_filters_by_headline_and_summary():
+    entity = ops.create_watchlist_entity("Joe Biden")
+    run_id = ops.create_scrape_run()
+    matching_id, _ = ops.upsert_article(
+        "nine_com_au", "https://www.nine.com.au/world-news/search-match.html",
+        "Tariffs hit record high", "world-news", run_id,
+    )
+    ops.mark_article_fetched(matching_id, "body")
+    ops.insert_watchlist_match(matching_id, entity["id"], None, "joe biden", run_id)
+    matching_story = ops.create_story()
+    ops.add_article_to_story(matching_story, matching_id, run_id)
+    ops.upsert_story_summary(matching_story, "A story about something else.", "test-model")
+
+    _seed_n_stories(1, entity["id"], "Joe Biden", "https://www.nine.com.au/world-news/search-nomatch")
+
+    resp = client.get("/stories?q=tariffs")
+    assert resp.status_code == 200
+    assert resp.text.count('<article class="story">') == 1
+    assert "Tariffs hit record high" in resp.text
+    assert "Searching for" in resp.text and "tariffs" in resp.text
+
+    resp_none = client.get("/stories?q=nonexistentterm")
+    assert resp_none.status_code == 200
+    assert "No stories found" in resp_none.text
+
+
+def test_stories_page_topic_counts_reflect_active_date_filter():
+    entity = ops.create_watchlist_entity("AFL")
+    old_story, new_story = _seed_n_stories(2, entity["id"], "AFL", "https://www.nine.com.au/world-news/topic-date")
+    with ops.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-03-01 10:00:00+00", old_story))
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-03-02 10:00:00+00", new_story))
+
+    resp_unfiltered = client.get("/stories")
+    assert ">AFL (2)<" in resp_unfiltered.text
+
+    resp_filtered = client.get("/stories?date=2026-03-01")
+    assert ">AFL (1)<" in resp_filtered.text
+    assert ">AFL (2)<" not in resp_filtered.text
+
+
+def test_stories_page_topic_counts_reflect_active_search():
+    entity = ops.create_watchlist_entity("AFL")
+    run_id = ops.create_scrape_run()
+    article_id, _ = ops.upsert_article(
+        "nine_com_au", "https://www.nine.com.au/world-news/topic-search-match.html",
+        "Grand final preview", "world-news", run_id,
+    )
+    ops.mark_article_fetched(article_id, "body")
+    ops.insert_watchlist_match(article_id, entity["id"], None, "afl", run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, run_id)
+    ops.upsert_story_summary(story_id, "A summary.", "test-model")
+
+    _seed_n_stories(1, entity["id"], "AFL", "https://www.nine.com.au/world-news/topic-search-nomatch")
+
+    resp_unfiltered = client.get("/stories")
+    assert ">AFL (2)<" in resp_unfiltered.text
+
+    resp_filtered = client.get("/stories?q=grand+final")
+    assert ">AFL (1)<" in resp_filtered.text

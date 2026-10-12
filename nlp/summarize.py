@@ -1,4 +1,21 @@
-"""Local abstractive summarization via a distilled BART model."""
+"""Local abstractive summarization via a distilled BART model.
+
+Greedy decoding (do_sample=False, the default num_beams=1) has no built-in
+defense against getting stuck repeating a short phrase - a known failure
+mode of autoregressive generation. Hit this for real: one story's summary
+came out as "...the first and the first-and've'I've been a member of the
+public and the public has been the first of the..." on otherwise-clean
+English input that re-summarizes fine on retry, so it reads as the greedy
+search occasionally tipping into a repetition loop rather than anything
+wrong with the input - see no_repeat_ngram_size below, the standard
+mitigation. (A second, much larger source of garbled summaries turned out
+to be a separate bug entirely - untranslated non-English articles reaching
+this English-only model at all; see
+database.operations.get_articles_needing_embedding's docstring. This
+repetition guard doesn't fix that class - fed raw Chinese text, it still
+produces nonsense, just not a repetition loop - the real fix there is never
+letting that text arrive here untranslated.)
+"""
 import torch
 from transformers import pipeline
 
@@ -34,5 +51,7 @@ def summarize(text: str) -> str:
         tokenizer.encode(text, truncation=True, max_length=_MAX_INPUT_TOKENS),
         skip_special_tokens=True,
     )
-    result = summarizer(truncated, max_length=130, min_length=30, do_sample=False)
+    result = summarizer(
+        truncated, max_length=130, min_length=30, do_sample=False, no_repeat_ngram_size=3
+    )
     return result[0]["summary_text"].strip()

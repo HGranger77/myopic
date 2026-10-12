@@ -69,14 +69,22 @@ def filter_significant_entities(
     doesn't have spaCy installed, so it must not import anything that pulls
     spaCy in.
 
-    Two things happen:
+    Three things happen:
 
     1. Variant merging - occurrences whose normalized text is a whole-word
        substring of each other ("Biden" / "Joe Biden") are treated as the same
        entity, so a name isn't undercounted just because the article
        shortens it on later mentions. The longest variant seen is used as the
        canonical display text.
-    2. Significance filtering - a merged entity is kept only if it's
+    2. Ambiguous-mention handling - a short mention that whole-word-matches
+       MORE THAN ONE already-distinct entity isn't credited to any of them.
+       Real case this fixed: an article about "Guo Wu" and his son
+       "Santiago Wu" later says "the Wu family" - a genuine collective
+       reference, not clearly either person. Attaching that bare "Wu" to
+       whichever full name happened to be seen first (the previous
+       behavior) was an arbitrary guess dressed up as a real signal, so it's
+       dropped instead - it counts toward neither mention total.
+    3. Significance filtering - a merged entity is kept only if it's
        mentioned `min_mentions`+ times, or its first mention falls within
        `early_position_chars` of the start of the text. This is what drops a
        one-off byline name or incidental aside (late, single mention) while
@@ -94,18 +102,17 @@ def filter_significant_entities(
         text = ent["text"]
         norm = ent.get("normalized_text") or normalize(text)
         start = ent.get("start_char") or 0
-        group = next(
-            (
-                g
-                for g in groups
-                if any(contains_whole_word(norm, v[1]) or contains_whole_word(v[1], norm) for v in g["variants"])
-            ),
-            None,
-        )
-        if group is None:
-            group = {"variants": []}
-            groups.append(group)
-        group["variants"].append((text, norm, start))
+        matching = [
+            g
+            for g in groups
+            if any(contains_whole_word(norm, v[1]) or contains_whole_word(v[1], norm) for v in g["variants"])
+        ]
+        if len(matching) > 1:
+            continue  # ambiguous - could belong to more than one entity already seen, so credit none
+        if matching:
+            matching[0]["variants"].append((text, norm, start))
+        else:
+            groups.append({"variants": [(text, norm, start)]})
 
     significant = []
     for group in groups:

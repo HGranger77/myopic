@@ -12,7 +12,9 @@ def test_add_alias_and_get_active_watchlist_with_aliases():
     ops.add_alias(entity["id"], "Biden")
     watchlist = ops.get_active_watchlist_with_aliases()
     assert len(watchlist) == 1
-    assert sorted(watchlist[0]["aliases"]) == ["biden", "joe biden"]
+    # original casing, not normalized_alias - nlp.tagging's zero-shot
+    # classifier is casing-sensitive (see its docstring: "AFL" vs "afl")
+    assert sorted(watchlist[0]["aliases"]) == ["Biden", "Joe Biden"]
 
 
 def test_inactive_entities_excluded_from_active_watchlist():
@@ -70,6 +72,197 @@ def test_translation_worklist_and_set_translation():
     assert ops.get_articles_needing_translation(["chinanews"]) == []
 
 
+def test_embedding_worklist_excludes_untranslated_non_english_articles():
+    # Regression test: embed-article must never embed a non-English
+    # article's RAW untranslated text - that happened for real (49
+    # untranslated chinanews articles got embedded, clustered into one
+    # garbage story, and summarized into nonsense). See
+    # get_articles_needing_embedding()'s docstring.
+    run_id = ops.create_scrape_run()
+    zh_id, _ = ops.upsert_article("chinanews", "https://example.com/zh-embed", "测试标题", "home", run_id)
+    ops.mark_article_fetched(zh_id, "测试正文内容。")
+    en_id, _ = ops.upsert_article("nine_com_au", "https://example.com/en-embed", "Headline", "home", run_id)
+    ops.mark_article_fetched(en_id, "Body text.")
+
+    # English article is ready immediately; untranslated Chinese one waits
+    ids = [a["id"] for a in ops.get_articles_needing_embedding(["chinanews"])]
+    assert en_id in ids
+    assert zh_id not in ids
+
+    # once translated, it joins the worklist like any other fetched article
+    ops.set_article_translation(zh_id, "Test Headline", "Test body content.")
+    ids = [a["id"] for a in ops.get_articles_needing_embedding(["chinanews"])]
+    assert zh_id in ids
+
+    # no non_english_modules passed (default) - nothing is held back
+    assert {a["id"] for a in ops.get_articles_needing_embedding()} >= {zh_id, en_id}
+
+
+def test_entities_and_sentiment_worklists_are_gap_based_not_run_scoped():
+    # Regression test: these worklists must pick up a relevant article no
+    # matter how long ago its story membership was created - a relevance
+    # backfill (reclassifying old stories after a watchlist change, with no
+    # new story_articles row at all) must still surface it. The old
+    # run-scoped version of this worklist silently skipped articles like
+    # this forever - see get_relevant_articles_missing_entities()'s
+    # docstring for the real incident this prevents.
+    old_run_id = ops.create_scrape_run()
+    article_id = _make_fetched_article("https://example.com/old-run-article", old_run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, old_run_id)
+    ops.set_article_relevance(article_id, False)
+    assert ops.get_relevant_articles_missing_entities() == []
+    assert ops.get_relevant_articles_missing_sentiment() == []
+
+    # simulates a relevance backfill: is_relevant flips with no new run
+    ops.set_article_relevance(article_id, True)
+    assert ops.get_relevant_articles_missing_entities() == [{"article_id": article_id}]
+    assert ops.get_relevant_articles_missing_sentiment() == [{"article_id": article_id, "story_id": story_id}]
+
+    ops.insert_article_entities(article_id, [_entity("Someone", "PERSON", 0)])
+    ops.upsert_article_sentiment(article_id, story_id, "POSITIVE", 0.9, "test-model")
+    assert ops.get_relevant_articles_missing_entities() == []
+    assert ops.get_relevant_articles_missing_sentiment() == []
+
+
+def test_entities_worklist_does_not_reprocess_zero_entity_articles_forever():
+    # A genuinely zero-entity article (very short text, or non-English text
+    # an English NER model finds nothing recognizable in - this happened
+    # for real with untranslated Chinese articles that slipped through
+    # before the embed-article translation gate existed) must still drop
+    # out of the worklist once checked. Keying off "no article_entities
+    # rows exist" can't tell that apart from "never checked" and would
+    # reprocess the same zero-entity article every run forever - see
+    # insert_article_entities()'s docstring for the entities_checked_at fix.
+    run_id = ops.create_scrape_run()
+    article_id = _make_fetched_article("https://example.com/zero-entities", run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, run_id)
+    ops.set_article_relevance(article_id, True)
+    assert ops.get_relevant_articles_missing_entities() == [{"article_id": article_id}]
+
+    ops.insert_article_entities(article_id, [])  # ran NER, found nothing
+    assert ops.get_relevant_articles_missing_entities() == []
+
+
+def _seed_relevant_story(entity_id: int, url: str, summary: str, headline: str = "Headline") -> int:
+    run_id = ops.create_scrape_run()
+    article_id, _ = ops.upsert_article("nine_com_au", url, headline, "home", run_id)
+    ops.mark_article_fetched(article_id, "body")
+    ops.insert_watchlist_match(article_id, entity_id, None, "joe biden", run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, run_id)
+    ops.upsert_story_summary(story_id, summary, "test-model")
+    return story_id
+
+
+def test_recent_stories_pagination_and_total_count():
+    entity = ops.create_watchlist_entity("Joe Biden")
+    for i in range(3):
+        _seed_relevant_story(entity["id"], f"https://example.com/pg-{i}", f"Summary {i}")
+
+    page1, total = ops.get_recent_stories_with_summaries(limit=2, offset=0)
+    assert total == 3
+    assert len(page1) == 2
+
+    page2, total2 = ops.get_recent_stories_with_summaries(limit=2, offset=2)
+    assert total2 == 3  # same total regardless of which page
+    assert len(page2) == 1
+
+    # together, both pages cover every story with no overlap
+    page1_ids = {s["story_id"] for s in page1}
+    page2_ids = {s["story_id"] for s in page2}
+    assert page1_ids.isdisjoint(page2_ids)
+    assert len(page1_ids | page2_ids) == 3
+
+
+def test_recent_stories_date_filter_and_get_story_dates():
+    entity = ops.create_watchlist_entity("Joe Biden")
+    old_story = _seed_relevant_story(entity["id"], "https://example.com/date-old", "Old summary")
+    new_story = _seed_relevant_story(entity["id"], "https://example.com/date-new", "New summary")
+
+    with ops.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-01-01 10:00:00+00", old_story))
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-01-02 10:00:00+00", new_story))
+
+    import datetime
+
+    jan1_stories, jan1_total = ops.get_recent_stories_with_summaries(date="2026-01-01")
+    assert jan1_total == 1
+    assert jan1_stories[0]["story_id"] == old_story
+
+    dates = {row["day"]: row["story_count"] for row in ops.get_story_dates()}
+    assert dates[datetime.date(2026, 1, 1)] == 1
+    assert dates[datetime.date(2026, 1, 2)] == 1
+
+
+def test_recent_stories_search_matches_summary_or_headline():
+    entity = ops.create_watchlist_entity("Joe Biden")
+    summary_match = _seed_relevant_story(
+        entity["id"], "https://example.com/search-summary", "A story about tariffs and trade.", headline="Unrelated"
+    )
+    headline_match = _seed_relevant_story(
+        entity["id"], "https://example.com/search-headline", "Nothing special here.", headline="Tariffs hit record high"
+    )
+    _seed_relevant_story(entity["id"], "https://example.com/search-none", "Completely different topic.")
+
+    results, total = ops.get_recent_stories_with_summaries(q="tariffs")
+    assert total == 2
+    assert {s["story_id"] for s in results} == {summary_match, headline_match}
+
+    # case-insensitive
+    results_upper, total_upper = ops.get_recent_stories_with_summaries(q="TARIFFS")
+    assert total_upper == 2
+
+    none_results, none_total = ops.get_recent_stories_with_summaries(q="nonexistentterm")
+    assert none_total == 0
+    assert none_results == []
+
+
+def test_get_story_dates_respects_search_term():
+    entity = ops.create_watchlist_entity("Joe Biden")
+    match_story = _seed_relevant_story(entity["id"], "https://example.com/search-date-a", "Tariffs announced today.")
+    other_story = _seed_relevant_story(entity["id"], "https://example.com/search-date-b", "Unrelated news.")
+
+    with ops.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-02-01 10:00:00+00", match_story))
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-02-02 10:00:00+00", other_story))
+
+    import datetime
+
+    dates = {row["day"]: row["story_count"] for row in ops.get_story_dates(q="tariffs")}
+    assert dates == {datetime.date(2026, 2, 1): 1}
+
+
+def test_topic_story_counts_respect_date_and_search_filters():
+    entity = ops.create_watchlist_entity("AFL")
+    old_story = _seed_relevant_story(
+        entity["id"], "https://example.com/topic-count-old", "Grand final preview tonight."
+    )
+    new_story = _seed_relevant_story(entity["id"], "https://example.com/topic-count-new", "Off-season trade news.")
+    with ops.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-03-01 10:00:00+00", old_story))
+            cur.execute("UPDATE stories SET updated_at = %s WHERE id = %s", ("2026-03-02 10:00:00+00", new_story))
+
+    unfiltered = {row["canonical_name"]: row["story_count"] for row in ops.get_topic_story_counts()}
+    assert unfiltered["AFL"] == 2
+
+    by_date = {row["canonical_name"]: row["story_count"] for row in ops.get_topic_story_counts(date="2026-03-01")}
+    assert by_date["AFL"] == 1
+
+    by_search = {row["canonical_name"]: row["story_count"] for row in ops.get_topic_story_counts(q="grand final")}
+    assert by_search["AFL"] == 1
+
+    # a topic with zero matches under the filter still appears, with count 0
+    # - not silently dropped (the LEFT JOIN requirement the docstring calls out)
+    ops.create_watchlist_entity("NRL")
+    by_search_zero = {row["canonical_name"]: row["story_count"] for row in ops.get_topic_story_counts(q="grand final")}
+    assert by_search_zero["NRL"] == 0
+
+
 def test_translation_worklist_respects_limit():
     run_id = ops.create_scrape_run()
     ids = []
@@ -101,16 +294,18 @@ def test_story_lifecycle_create_join_and_touched_ids():
     ops.add_article_to_story(story_id, article_id, run_id)
 
     assert ops.get_touched_story_ids(run_id) == [story_id]
-    # get_new_story_memberships_for_run (sentiment-article/article-entities'
-    # worklist) and get_touched_relevant_story_ids (finalize's relevant-count
-    # query) are both scoped to tag-relevance's verdict, not just "touched" -
-    # empty until relevance is decided, same as in the real DAG order.
-    assert ops.get_new_story_memberships_for_run(run_id) == []
+    # get_relevant_articles_missing_entities/sentiment (article-entities' and
+    # sentiment-article's worklists) and get_touched_relevant_story_ids
+    # (finalize's relevant-count query) are all scoped to tag-relevance's
+    # verdict, not just "touched" - empty until relevance is decided, same
+    # as in the real DAG order.
+    assert ops.get_relevant_articles_missing_entities() == []
+    assert ops.get_relevant_articles_missing_sentiment() == []
     assert ops.get_touched_relevant_story_ids(run_id) == []
 
     ops.set_article_relevance(article_id, True)
-    members = ops.get_new_story_memberships_for_run(run_id)
-    assert members == [{"article_id": article_id, "story_id": story_id}]
+    assert ops.get_relevant_articles_missing_entities() == [{"article_id": article_id}]
+    assert ops.get_relevant_articles_missing_sentiment() == [{"article_id": article_id, "story_id": story_id}]
     assert ops.get_touched_relevant_story_ids(run_id) == [story_id]
 
     articles = ops.get_story_articles(story_id)

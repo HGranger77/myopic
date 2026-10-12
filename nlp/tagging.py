@@ -25,9 +25,30 @@ Validated against the same true/false-positive pair used throughout this
 project: the Parramatta Eels NRL team vs. an unrelated article about
 Parramatta the *council*. True case scores 0.997 on "Parramatta Eels",
 false case 0.448 - a wide enough margin for a single global threshold.
-Unlike nlp/relevance.py, this has no natural place to fold in aliases (a
-candidate label is just a short phrase, not a sentence) - matching is on
-canonical_name only.
+
+A bare acronym watchlist topic is a bad candidate label, though: zero-shot
+NLI scores a label against an implicit "this example is about {label}"
+hypothesis, and a 2-letter token like "AI" makes a near-meaningless one -
+measured directly, an unrelated football-transfer summary scored 0.35-0.55
+on the literal label "AI" (close enough to the 0.6 threshold to cross it on
+some stories), and an unrelated ICE-raid story scored 0.55. Swapping in the
+longest watchlist alias as the label text instead ("artificial intelligence"
+if that's been added as an alias for "AI") fixed it cleanly: those same two
+false positives dropped to 0.01 and 0.0002, while the genuine AI stories
+stayed at 0.97-0.99. See _classification_label() below - this is exactly
+what watchlist aliases are for, and nlp/relevance.py (the LLM path) already
+used them; this module just hadn't been wired up to.
+
+CASING MATTERS to this classifier - don't lowercase a label on its way in.
+The first version of this fix pulled alias text from
+get_active_watchlist_with_aliases(), which at the time returned
+normalized_alias (always lowercase). That broke "AFL", which had no other
+alias to fall back to, so its own canonical name got lowercased to "afl" -
+measured directly, "AFL" scored 0.01-0.40 on two unrelated stories (a tiger
+attack, a retail-earnings report) while "afl" scored 0.64-0.76 on the SAME
+two stories, a false-positive regression worse than the "AI" bug this was
+meant to fix. get_active_watchlist_with_aliases() now returns the
+ORIGINAL-case alias text for exactly this reason.
 """
 import torch
 from transformers import pipeline
@@ -54,6 +75,22 @@ def _get_classifier():
     return _classifier
 
 
+def _classification_label(entry: dict) -> str:
+    """The longest alias is almost always the most descriptive form of a
+    watchlist entity ("artificial intelligence" vs "AI", "Parramatta Eels"
+    vs a shorter alias if one existed) - see this module's docstring for why
+    that specifically matters to a zero-shot label. Falls back to
+    canonical_name only if aliases is empty, which shouldn't normally happen
+    since create_watchlist_entity always seeds canonical_name as an alias.
+
+    Known limitation, not handled: if two different watchlist entities end
+    up with the identical longest alias text, the classifier call still
+    works, but only one of them will be resolvable from the returned scores
+    dict in check_relevance() below - a non-issue for a small personal
+    watchlist, but not something this guards against."""
+    return max(entry["aliases"], key=len) if entry["aliases"] else entry["canonical_name"]
+
+
 def check_relevance(text: str, watchlist: list[dict]) -> list[dict]:
     """text: a story's short summary, NOT the raw article body - see this
     module's docstring for why that distinction is load-bearing here.
@@ -68,13 +105,13 @@ def check_relevance(text: str, watchlist: list[dict]) -> list[dict]:
         return []
 
     classifier = _get_classifier()
-    labels = [entry["canonical_name"] for entry in watchlist]
-    result = classifier(text[:_MAX_INPUT_CHARS], candidate_labels=labels, multi_label=True)
+    label_by_id = {entry["watchlist_entity_id"]: _classification_label(entry) for entry in watchlist}
+    result = classifier(text[:_MAX_INPUT_CHARS], candidate_labels=list(label_by_id.values()), multi_label=True)
     scores = dict(zip(result["labels"], result["scores"]))
 
     matches = []
     for entry in watchlist:
-        if scores.get(entry["canonical_name"], 0.0) >= _RELEVANCE_THRESHOLD:
+        if scores.get(label_by_id[entry["watchlist_entity_id"]], 0.0) >= _RELEVANCE_THRESHOLD:
             matches.append({
                 "watchlist_entity_id": entry["watchlist_entity_id"],
                 "canonical_name": entry["canonical_name"],

@@ -168,11 +168,13 @@ def fetch_article_bodies() -> int:
 # without a model pay nothing" discipline as every other stage.
 # ---------------------------------------------------------------------------
 
-def translate_article() -> int:
+def _non_english_modules() -> list[str]:
     sources = load_sources()
-    non_english_modules = [
-        s["module"] for s in sources["sources"] if s.get("language", "en") != "en"
-    ]
+    return [s["module"] for s in sources["sources"] if s.get("language", "en") != "en"]
+
+
+def translate_article() -> int:
+    non_english_modules = _non_english_modules()
     if not non_english_modules:
         print("[translate-article] no non-English sources configured, nothing to do")
         return 0
@@ -198,7 +200,11 @@ def translate_article() -> int:
 def embed_article() -> int:
     from nlp.embedding import embed
 
-    to_embed = ops.get_articles_needing_embedding()
+    # Must exclude non-English articles translate-article hasn't reached yet
+    # (TRANSLATE_MAX_ARTICLES caps it to a handful per run) - see
+    # get_articles_needing_embedding()'s docstring for the garbled-story
+    # incident this prevents.
+    to_embed = ops.get_articles_needing_embedding(_non_english_modules())
     for i, article in enumerate(to_embed, start=1):
         vector = embed(article["body_text"])
         ops.set_article_embedding(article["id"], vector)
@@ -306,58 +312,65 @@ def tag_relevance(run_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# sentiment-article (one task, sentiment model, loop over new memberships)
+# sentiment-article (one task, sentiment model, loop over relevant articles
+# still missing a sentiment score)
 # ---------------------------------------------------------------------------
 
 def sentiment_article(run_id: int) -> int:
+    # run_id is unused - the worklist is gap-based (every relevant article
+    # missing a sentiment row), not scoped to this run's new memberships.
+    # Kept as a parameter anyway since every stage in this DAG takes
+    # --run-id uniformly (see this file's module docstring) - removing it
+    # here would mean this is the one stage whose Argo task has no
+    # parameters, for no real benefit.
     from nlp.sentiment import MODEL_NAME as SENTIMENT_MODEL_NAME
     from nlp.sentiment import analyze as analyze_sentiment
 
-    new_memberships = ops.get_new_story_memberships_for_run(run_id)
+    todo = ops.get_relevant_articles_missing_sentiment()
     done = 0
-    for i, membership in enumerate(new_memberships, start=1):
+    for i, row in enumerate(todo, start=1):
         try:
-            article = ops.get_article(membership["article_id"])
+            article = ops.get_article(row["article_id"])
             label, score = analyze_sentiment(article["body_text"])
-            ops.upsert_article_sentiment(
-                article["id"], membership["story_id"], label, score, SENTIMENT_MODEL_NAME
-            )
+            ops.upsert_article_sentiment(article["id"], row["story_id"], label, score, SENTIMENT_MODEL_NAME)
             done += 1
-            print(f"[sentiment-article] {i}/{len(new_memberships)} article {article['id']}: {label} ({score:.3f})")
+            print(f"[sentiment-article] {i}/{len(todo)} article {article['id']}: {label} ({score:.3f})")
         except Exception as exc:  # noqa: BLE001
-            print(f"[sentiment-article] {i}/{len(new_memberships)} failed for article "
-                  f"{membership['article_id']}: {exc}", file=sys.stderr)
+            print(f"[sentiment-article] {i}/{len(todo)} failed for article "
+                  f"{row['article_id']}: {exc}", file=sys.stderr)
 
-    print(f"[sentiment-article] scored {done}/{len(new_memberships)} new articles")
+    print(f"[sentiment-article] scored {done}/{len(todo)} articles")
     return 0
 
 
 # ---------------------------------------------------------------------------
-# article-entities (one task, NER model, loop over new memberships)
+# article-entities (one task, NER model, loop over relevant articles still
+# missing entities)
 #
-# Same worklist as sentiment-article - one-shot per article, not redone
-# every run. Powers the per-article/per-source entity breakdown on the
-# /stories page.
+# Same worklist shape as sentiment-article - one-shot per article, not
+# redone every run. Powers the per-article/per-source entity breakdown on
+# the /stories page.
 # ---------------------------------------------------------------------------
 
 def article_entities(run_id: int) -> int:
+    # run_id unused - see sentiment_article()'s comment above for why.
     from nlp.ner import extract_entities
 
-    new_memberships = ops.get_new_story_memberships_for_run(run_id)
+    todo = ops.get_relevant_articles_missing_entities()
     done = 0
-    for i, membership in enumerate(new_memberships, start=1):
+    for i, row in enumerate(todo, start=1):
         try:
-            article = ops.get_article(membership["article_id"])
+            article = ops.get_article(row["article_id"])
             entities = extract_entities(article["body_text"])
             ops.delete_article_entities(article["id"])
             ops.insert_article_entities(article["id"], entities)
             done += 1
-            print(f"[article-entities] {i}/{len(new_memberships)} article {article['id']}: {len(entities)} entities")
+            print(f"[article-entities] {i}/{len(todo)} article {article['id']}: {len(entities)} entities")
         except Exception as exc:  # noqa: BLE001
-            print(f"[article-entities] {i}/{len(new_memberships)} failed for article "
-                  f"{membership['article_id']}: {exc}", file=sys.stderr)
+            print(f"[article-entities] {i}/{len(todo)} failed for article "
+                  f"{row['article_id']}: {exc}", file=sys.stderr)
 
-    print(f"[article-entities] processed {done}/{len(new_memberships)} new articles")
+    print(f"[article-entities] processed {done}/{len(todo)} articles")
     return 0
 
 

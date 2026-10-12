@@ -47,9 +47,28 @@
     line-height: 1.5;
   }
   .page {
-    max-width: 760px;
+    max-width: 1080px;
     margin: 0 auto;
     padding: 2.5rem 1.25rem 4rem;
+  }
+  .page-layout {
+    display: flex;
+    gap: 2.5rem;
+    align-items: flex-start;
+  }
+  .main-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 2rem;
+  }
+  @media (max-width: 860px) {
+    .page-layout { flex-direction: column; }
+    .sidebar { width: 100%; position: static; order: -1; }
   }
   header { margin-bottom: 2rem; }
   h1 {
@@ -191,6 +210,38 @@
     padding: 3rem 0;
     text-align: center;
   }
+  .search-bar {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .search-bar input[type="search"] {
+    flex: 1;
+    min-width: 0;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--text);
+  }
+  .search-bar input[type="search"]:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .search-bar button {
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+  }
+  .search-bar button:hover {
+    opacity: 0.9;
+  }
   .filters {
     display: flex;
     flex-wrap: wrap;
@@ -215,6 +266,95 @@
     color: #fff;
     font-weight: 600;
   }
+  .calendar {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+  }
+  .calendar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .calendar-header a {
+    color: var(--muted);
+    text-decoration: none;
+    padding: 0.1rem 0.5rem;
+    border-radius: 6px;
+  }
+  .calendar-header a:hover {
+    color: var(--accent);
+    background: var(--badge-bg);
+  }
+  .calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 0.2rem;
+    text-align: center;
+  }
+  .calendar-dow {
+    font-size: 0.68rem;
+    color: var(--muted);
+    padding-bottom: 0.3rem;
+  }
+  .calendar-day {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 1;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  a.calendar-day {
+    color: var(--text);
+    background: var(--badge-bg);
+    font-weight: 600;
+  }
+  a.calendar-day:hover {
+    background: var(--accent);
+    color: #fff;
+  }
+  .calendar-day.today {
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+  a.calendar-day.selected {
+    background: var(--accent);
+    color: #fff;
+  }
+  .calendar-clear {
+    display: block;
+    text-align: center;
+    margin-top: 0.75rem;
+    font-size: 0.78rem;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1.25rem;
+    margin-top: 1.5rem;
+    font-size: 0.85rem;
+  }
+  .pagination a {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .pagination span.disabled {
+    color: var(--muted);
+    opacity: 0.5;
+  }
+  .pagination .page-indicator {
+    color: var(--muted);
+  }
 </style>
 </head>
 <body>
@@ -224,12 +364,30 @@
     <p>Topics of interest, clustered across sources and summarized locally.</p>
   </header>
 
+  <div class="page-layout">
+  <div class="main-content">
+
+  <form class="search-bar" method="get" action="/stories">
+    {% if selected_topic %}<input type="hidden" name="topic" value="{{ selected_topic }}">{% endif %}
+    {% if selected_date %}<input type="hidden" name="date" value="{{ selected_date }}">{% endif %}
+    <input type="search" name="q" placeholder="Search headlines and summaries…" value="{{ selected_query or '' }}">
+    <button type="submit">Search</button>
+  </form>
+
   <div class="filters">
-    <a class="filter-pill{{ ' active' if not selected_topic }}" href="/stories">All</a>
+    <a class="filter-pill{{ ' active' if not selected_topic }}" href="{{ all_topics_href }}">All</a>
     {% for t in topics %}
-    <a class="filter-pill{{ ' active' if t.name == selected_topic }}" href="/stories?topic={{ t.name|urlencode }}">{{ t.display_name }} ({{ t.count }})</a>
+    <a class="filter-pill{{ ' active' if t.name == selected_topic }}" href="{{ t.href }}">{{ t.display_name }} ({{ t.count }})</a>
     {% endfor %}
   </div>
+
+  {% if selected_date or selected_query %}
+  <p style="margin: -1rem 0 1.25rem; font-size: 0.85rem; color: var(--muted);">
+    {% if selected_date %}Showing stories updated on <strong>{{ selected_date }}</strong> — <a href="{{ clear_date_href }}" style="color: var(--accent);">clear</a>{% endif %}
+    {% if selected_date and selected_query %}<br>{% endif %}
+    {% if selected_query %}Searching for "<strong>{{ selected_query }}</strong>" — <a href="{{ clear_search_href }}" style="color: var(--accent);">clear</a>{% endif %}
+  </p>
+  {% endif %}
 
   {% if stories %}
     {% for story in stories %}
@@ -248,7 +406,7 @@
       <p class="summary">{{ story.summary_text }}</p>
       {% if story.common_entities.people or story.common_entities.organizations or story.common_entities.locations %}
       <div class="common-entities">
-        <span class="entities-label">Common to all sources</span>
+        <span class="entities-label">Mentioned by most sources</span>
         <div class="entities">
           {% for p in story.common_entities.people %}<span class="entity-tag person">{{ p }}</span>{% endfor %}
           {% for o in story.common_entities.organizations %}<span class="entity-tag org">{{ o }}</span>{% endfor %}
@@ -279,15 +437,68 @@
       </details>
     </article>
     {% endfor %}
+
+    {% if total_pages > 1 %}
+    <div class="pagination">
+      {% if page > 1 %}
+        <a href="{{ prev_page_href }}">← Newer</a>
+      {% else %}
+        <span class="disabled">← Newer</span>
+      {% endif %}
+      <span class="page-indicator">Page {{ page }} of {{ total_pages }}</span>
+      {% if page < total_pages %}
+        <a href="{{ next_page_href }}">Older →</a>
+      {% else %}
+        <span class="disabled">Older →</span>
+      {% endif %}
+    </div>
+    {% endif %}
   {% else %}
     <p class="empty">
-      {% if selected_topic %}
-        No stories matching "{{ selected_topic_display }}" yet.
+      {% if selected_topic or selected_date or selected_query %}
+        No stories found
+        {%- if selected_topic %} matching "{{ selected_topic_display }}"{% endif -%}
+        {%- if selected_query %} containing "{{ selected_query }}"{% endif -%}
+        {%- if selected_date %} on {{ selected_date }}{% endif -%}.
       {% else %}
         No reportable stories yet — nothing scraped so far has matched the watchlist.
       {% endif %}
     </p>
   {% endif %}
+
+  </div>
+
+  <aside class="sidebar">
+    <div class="calendar">
+      <div class="calendar-header">
+        <a href="{{ calendar.prev_href }}">‹</a>
+        <span>{{ calendar.label }}</span>
+        <a href="{{ calendar.next_href }}">›</a>
+      </div>
+      <div class="calendar-grid">
+        {% for dow in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] %}
+        <span class="calendar-dow">{{ dow }}</span>
+        {% endfor %}
+        {% for week in calendar.weeks %}
+          {% for day in week %}
+            {% if day is none %}
+              <span class="calendar-day"></span>
+            {% elif day.count > 0 %}
+              <a class="calendar-day{{ ' today' if day.is_today }}{{ ' selected' if day.is_selected }}"
+                 href="{{ day.href }}" title="{{ day.count }} stor{{ 'y' if day.count == 1 else 'ies' }}">{{ day.day_num }}</a>
+            {% else %}
+              <span class="calendar-day{{ ' today' if day.is_today }}">{{ day.day_num }}</span>
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+      </div>
+      {% if selected_date %}
+      <a class="calendar-clear" href="{{ clear_date_href }}">Clear date filter</a>
+      {% endif %}
+    </div>
+  </aside>
+
+  </div>
 </div>
 </body>
 </html>

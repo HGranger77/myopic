@@ -122,12 +122,22 @@ def _insert_alias(cur, entity_id: int, alias: str) -> dict:
 
 
 def get_active_watchlist_with_aliases() -> list[dict]:
-    """Returns [{watchlist_entity_id, canonical_name, aliases: [normalized_alias, ...]}]."""
+    """Returns [{watchlist_entity_id, canonical_name, aliases: [alias, ...]}].
+
+    `aliases` holds the ORIGINAL-case alias text (`wa.alias`), not
+    `normalized_alias` - matters more than it looks. nlp.tagging's zero-shot
+    classifier treats whichever alias it's given as a literal candidate
+    label, and casing changes its score: measured directly, "AFL" scored
+    0.01-0.40 on unrelated stories while the lowercased "afl" scored
+    0.64-0.76 on the SAME stories - a false-positive regression introduced
+    by an earlier version of this function that returned normalized_alias.
+    Since each normalized alias is unique per entity (the table's UNIQUE
+    constraint), there's exactly one original-case spelling to pick."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT we.id AS watchlist_entity_id, we.canonical_name, wa.normalized_alias
+                SELECT we.id AS watchlist_entity_id, we.canonical_name, wa.alias
                 FROM watchlist_entities we
                 JOIN watchlist_aliases wa ON wa.watchlist_entity_id = we.id
                 WHERE we.is_active = TRUE
@@ -145,7 +155,7 @@ def get_active_watchlist_with_aliases() -> list[dict]:
                 "aliases": [],
             },
         )
-        entry["aliases"].append(row["normalized_alias"])
+        entry["aliases"].append(row["alias"])
     return list(grouped.values())
 
 
@@ -388,14 +398,32 @@ def count_matched_articles(scrape_run_id: int) -> int:
 # embed-article
 # ---------------------------------------------------------------------------
 
-def get_articles_needing_embedding() -> list[dict]:
+def get_articles_needing_embedding(non_english_modules: Iterable[str] = ()) -> list[dict]:
     """Every fetched article, not just watchlist-relevant ones - relevance
     isn't decided until tag-relevance, downstream of clustering/summarizing
-    now (see that function's docstring in run_batch.py for why)."""
+    now (see that function's docstring in run_batch.py for why).
+
+    non_english_modules: source modules translate-article treats as
+    non-English (same list that stage computes from config/sources.yaml).
+    An article from one of these sources is excluded here until it's
+    actually been translated (original_headline IS NOT NULL) - without this,
+    embed-article was feeding RAW CHINESE TEXT into an English-only sentence
+    embedding model for any article still waiting behind
+    translate-article's TRANSLATE_MAX_ARTICLES-per-run cap. Confirmed this
+    is exactly what happened to 49 chinanews articles that piled up
+    untranslated and all got clustered into one story based on meaningless
+    embeddings, which then fed a mush of raw Chinese into the English-only
+    summarizer and produced garbled nonsense - see nlp/summarize.py's
+    docstring for the measured garbage output."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT * FROM articles WHERE fetch_status = 'fetched' AND embedding IS NULL"
+                """
+                SELECT * FROM articles
+                WHERE fetch_status = 'fetched' AND embedding IS NULL
+                AND (source != ALL(%(non_english)s) OR original_headline IS NOT NULL)
+                """,
+                {"non_english": list(non_english_modules)},
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -521,21 +549,50 @@ def count_fetched_for_run(scrape_run_id: int) -> int:
             return cur.fetchone()["n"]
 
 
-def get_new_story_memberships_for_run(scrape_run_id: int) -> list[dict]:
-    """This run's new story memberships whose story has since been marked
-    relevant by tag-relevance - sentiment-article's and article-entities'
-    worklist (one-shot per article, unlike summarize-story which redoes the
-    whole story). Returns [{article_id, story_id}, ...]."""
+def get_relevant_articles_missing_entities() -> list[dict]:
+    """Every watchlist-relevant article article-entities hasn't checked yet
+    - article-entities' worklist (one-shot per article, unlike
+    summarize-story which redoes the whole story). Returns
+    [{article_id}, ...].
+
+    Keys off articles.entities_checked_at IS NULL, not "no article_entities
+    rows exist" - those aren't the same thing. A NOT-EXISTS-on-rows version
+    of this query can't tell "never processed" apart from "processed, found
+    zero entities" (common for short articles), so it kept reprocessing the
+    same zero-entity articles forever - see insert_article_entities's
+    docstring for the fix.
+
+    Also gap-based rather than scoped to "this run's new story
+    memberships" the way this used to be - that scoping assumed relevance
+    is only ever established at discovery time, which broke in practice:
+    reclassifying the whole watchlist after adding a topic or fixing a
+    classification label (see nlp.tagging's docstring for why that's
+    sometimes necessary) can retroactively flip is_relevant on an article
+    from a much older run, and the old run-scoped query would never pick
+    that article up - it silently stayed without NER forever. This version
+    is self-healing regardless of how or when relevance was decided."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT a.id AS article_id FROM articles a WHERE a.is_relevant = TRUE AND a.entities_checked_at IS NULL"
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_relevant_articles_missing_sentiment() -> list[dict]:
+    """Every watchlist-relevant article without an article_sentiment row yet
+    - sentiment-article's worklist. Gap-based for the same reason as
+    get_relevant_articles_missing_entities() above. Returns
+    [{article_id, story_id}, ...]."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT sa.article_id, sa.story_id
-                FROM story_articles sa
-                JOIN articles a ON a.id = sa.article_id
-                WHERE sa.scrape_run_id = %s AND a.is_relevant = TRUE
-                """,
-                (scrape_run_id,),
+                SELECT a.id AS article_id, sa.story_id FROM articles a
+                JOIN story_articles sa ON sa.article_id = a.id
+                WHERE a.is_relevant = TRUE
+                AND NOT EXISTS (SELECT 1 FROM article_sentiment asent WHERE asent.article_id = a.id)
+                """
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -618,7 +675,7 @@ def upsert_article_sentiment(
 def delete_article_entities(article_id: int) -> None:
     """Makes article-entities safe to retry without duplicating rows - see
     sentiment_article()/upsert_article_sentiment for why this stage's
-    worklist (new memberships of a relevant story) can hand back an article
+    worklist (relevant articles missing entities) can hand back an article
     it already processed on a retried task."""
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -627,7 +684,13 @@ def delete_article_entities(article_id: int) -> None:
 
 def insert_article_entities(article_id: int, entities: Iterable[dict]) -> None:
     """entities: iterable of {text, normalized_text, label, start_char, end_char}
-    (nlp.ner.extract_entities' return shape)."""
+    (nlp.ner.extract_entities' return shape).
+
+    Always stamps articles.entities_checked_at, even when `entities` is
+    empty - that's the signal article-entities' worklist actually keys off
+    (see get_relevant_articles_missing_entities), precisely so a genuinely
+    zero-entity article doesn't look indistinguishable from "never
+    checked" and get reprocessed every run forever."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             for ent in entities:
@@ -646,6 +709,7 @@ def insert_article_entities(article_id: int, entities: Iterable[dict]) -> None:
                         ent.get("end_char"),
                     ),
                 )
+            cur.execute("UPDATE articles SET entities_checked_at = now() WHERE id = %s", (article_id,))
 
 
 def get_article_entities(article_id: int) -> dict:
@@ -683,19 +747,41 @@ def get_article_entities(article_id: int) -> dict:
 # story viewer (web page)
 # ---------------------------------------------------------------------------
 
-def get_recent_stories_with_summaries(limit: int = 50, topic: Optional[str] = None) -> list[dict]:
+def get_recent_stories_with_summaries(
+    limit: int = 50,
+    topic: Optional[str] = None,
+    date: Optional[str] = None,
+    q: Optional[str] = None,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
     """Watchlist-relevant stories with a summary, newest-updated first, for
-    the web viewer. The HAVING clause is load-bearing, not cosmetic: every
-    touched story gets a summary now (tag-relevance runs after
-    summarize-story, not before - see run_batch.py), so without it this
-    would list every clustered story from every source, relevant or not,
-    rather than just the ones that matched something on the watchlist.
+    the web viewer. Returns (page_of_stories, total_matching_count) - the
+    count is a COUNT(*) OVER() window, computed from the same query in one
+    round trip rather than a separate count query, and reflects every
+    matching story (before LIMIT/OFFSET), for the pagination controls.
+
+    The HAVING clause is load-bearing, not cosmetic: every touched story
+    gets a summary now (tag-relevance runs after summarize-story, not
+    before - see run_batch.py), so without it this would list every
+    clustered story from every source, relevant or not, rather than just
+    the ones that matched something on the watchlist.
 
     topic: an exact watchlist_entities.canonical_name to filter to (the
     /stories page's topic filter) - applied as a WHERE/EXISTS check, not a
     HAVING on the aggregated matched_entities array, so it narrows which
     stories are considered (and therefore which hit the LIMIT) rather than
-    just which rows get filtered out of an already-limited set."""
+    just which rows get filtered out of an already-limited set.
+
+    date: an exact 'YYYY-MM-DD' string to filter to stories last updated on
+    that calendar day (the /stories page's calendar sidepane) - before this
+    existed, a day where tag-relevance touched 50+ stories would silently
+    push every older story off the single unpaginated page with no way to
+    reach them; see the incident that motivated adding this.
+
+    q: a free-text search term, matched case-insensitively (ILIKE) against
+    the story's summary OR any member article's headline - a plain
+    substring scan, not full-text search (ts_vector/GIN), since this is a
+    few thousand rows in a home-lab DB, not a search-engine-scale corpus."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -703,30 +789,73 @@ def get_recent_stories_with_summaries(limit: int = 50, topic: Optional[str] = No
                 SELECT
                     s.id AS story_id, s.updated_at, ss.summary_text,
                     array_agg(DISTINCT a.source) AS sources,
-                    array_agg(DISTINCT we.canonical_name) AS matched_entities
+                    array_agg(DISTINCT we.canonical_name) AS matched_entities,
+                    count(*) OVER() AS total_count
                 FROM stories s
                 JOIN story_summaries ss ON ss.story_id = s.id
                 JOIN story_articles sa ON sa.story_id = s.id
                 JOIN articles a ON a.id = sa.article_id
                 LEFT JOIN watchlist_matches wm ON wm.article_id = a.id
                 LEFT JOIN watchlist_entities we ON we.id = wm.watchlist_entity_id
-                WHERE %(topic)s IS NULL OR EXISTS (
+                WHERE (%(topic)s IS NULL OR EXISTS (
                     SELECT 1 FROM story_articles sa2
                     JOIN watchlist_matches wm2 ON wm2.article_id = sa2.article_id
                     JOIN watchlist_entities we2 ON we2.id = wm2.watchlist_entity_id
                     WHERE sa2.story_id = s.id AND we2.canonical_name = %(topic)s
-                )
+                ))
+                AND (%(date)s IS NULL OR s.updated_at::date = %(date)s::date)
+                AND (%(q)s IS NULL OR ss.summary_text ILIKE '%%' || %(q)s || '%%' OR EXISTS (
+                    SELECT 1 FROM story_articles sa3
+                    JOIN articles a3 ON a3.id = sa3.article_id
+                    WHERE sa3.story_id = s.id AND a3.headline ILIKE '%%' || %(q)s || '%%'
+                ))
                 GROUP BY s.id, s.updated_at, ss.summary_text
                 HAVING count(wm.id) > 0
                 ORDER BY s.updated_at DESC
-                LIMIT %(limit)s
+                LIMIT %(limit)s OFFSET %(offset)s
                 """,
-                {"topic": topic, "limit": limit},
+                {"topic": topic, "date": date, "q": q, "limit": limit, "offset": offset},
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+    total_count = rows[0]["total_count"] if rows else 0
+    for row in rows:
+        del row["total_count"]
+    return rows, total_count
+
+
+def get_story_dates(topic: Optional[str] = None, q: Optional[str] = None) -> list[dict]:
+    """Every calendar day (by story updated_at) with at least one
+    displayable relevant story, with a per-day count - powers the
+    /stories page's calendar sidepane (which days are clickable, and their
+    counts). Scoped to the current topic/search filters if active,
+    consistent with the topic pills' own counts. Returns
+    [{"day": date, "story_count": n}, ...]."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.updated_at::date AS day, count(DISTINCT s.id) AS story_count
+                FROM stories s
+                JOIN story_summaries ss ON ss.story_id = s.id
+                JOIN story_articles sa ON sa.story_id = s.id
+                JOIN articles a ON a.id = sa.article_id
+                JOIN watchlist_matches wm ON wm.article_id = a.id
+                JOIN watchlist_entities we ON we.id = wm.watchlist_entity_id
+                WHERE (%(topic)s IS NULL OR we.canonical_name = %(topic)s)
+                AND (%(q)s IS NULL OR ss.summary_text ILIKE '%%' || %(q)s || '%%' OR EXISTS (
+                    SELECT 1 FROM story_articles sa3
+                    JOIN articles a3 ON a3.id = sa3.article_id
+                    WHERE sa3.story_id = s.id AND a3.headline ILIKE '%%' || %(q)s || '%%'
+                ))
+                GROUP BY s.updated_at::date
+                ORDER BY day
+                """,
+                {"topic": topic, "q": q},
             )
             return [dict(row) for row in cur.fetchall()]
 
 
-def get_topic_story_counts() -> list[dict]:
+def get_topic_story_counts(date: Optional[str] = None, q: Optional[str] = None) -> list[dict]:
     """Every active watchlist topic with how many displayable stories (has a
     summary, counted once even if several of its member articles matched)
     currently match it - the /stories page's filter-pill list and counts.
@@ -735,7 +864,15 @@ def get_topic_story_counts() -> list[dict]:
     (with story_count 0) rather than silently disappearing as a filter
     option. Queried live on every request - any watchlist entity added via
     the API shows up here (and so on the page) on the very next load, no
-    caching or redeploy involved."""
+    caching or redeploy involved.
+
+    date/q: the same calendar-day and free-text filters as
+    get_recent_stories_with_summaries() - when active, counts reflect only
+    stories matching them, so the pills stay consistent with what's
+    actually on screen rather than showing stale all-time totals. Applied
+    in the JOIN conditions, not WHERE - putting them in WHERE would turn
+    the LEFT JOIN into a de facto INNER JOIN (a topic with zero stories
+    under the filter would vanish instead of showing "(0)")."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -744,11 +881,19 @@ def get_topic_story_counts() -> list[dict]:
                 FROM watchlist_entities we
                 LEFT JOIN watchlist_matches wm ON wm.watchlist_entity_id = we.id
                 LEFT JOIN story_articles sa ON sa.article_id = wm.article_id
-                LEFT JOIN story_summaries ss ON ss.story_id = sa.story_id
+                LEFT JOIN stories s ON s.id = sa.story_id
+                    AND (%(date)s IS NULL OR s.updated_at::date = %(date)s::date)
+                LEFT JOIN story_summaries ss ON ss.story_id = s.id
+                    AND (%(q)s IS NULL OR ss.summary_text ILIKE '%%' || %(q)s || '%%' OR EXISTS (
+                        SELECT 1 FROM story_articles sa3
+                        JOIN articles a3 ON a3.id = sa3.article_id
+                        WHERE sa3.story_id = s.id AND a3.headline ILIKE '%%' || %(q)s || '%%'
+                    ))
                 WHERE we.is_active = TRUE
                 GROUP BY we.id, we.canonical_name
                 ORDER BY lower(we.canonical_name)
-                """
+                """,
+                {"date": date, "q": q},
             )
             return [dict(row) for row in cur.fetchall()]
 
