@@ -143,6 +143,13 @@
   .sources summary::-webkit-details-marker { display: none; }
   .sources summary::before { content: "▸ "; }
   .sources[open] summary::before { content: "▾ "; }
+  .claims { margin-top: 0.75rem; font-size: 0.85rem; }
+  .claims summary { cursor: pointer; color: var(--muted); }
+  .claims-note { color: var(--muted); font-size: 0.78rem; margin: 0.4rem 0; }
+  .claim-group { border-left: 3px solid var(--muted); padding: 0.25rem 0 0.25rem 0.6rem; margin: 0.5rem 0; }
+  .claim-group.corroborated { border-left-color: var(--accent); }
+  .claim-status { font-size: 0.72rem; text-transform: uppercase; color: var(--muted); }
+  .claim-item { margin: 0.2rem 0; }
   .common-entities {
     margin-bottom: 0.9rem;
   }
@@ -413,6 +420,25 @@
           {% for l in story.common_entities.locations %}<span class="entity-tag location">{{ l }}</span>{% endfor %}
         </div>
       </div>
+      {% endif %}
+      {% if story.claim_groups %}
+      <details class="claims">
+        <summary>
+          {{ story.corroborated_count }} of {{ story.claim_groups|length }} claim{{ "s" if story.claim_groups|length != 1 else "" }} corroborated by 2+ sources
+        </summary>
+        <p class="claims-note">Agreement between outlets, not a verdict on truth &mdash; outlets sharing wire copy will agree.</p>
+        {% for group in story.claim_groups %}
+        <div class="claim-group {{ group.status }}">
+          <span class="claim-status">{{ "Corroborated (" ~ group.source_count ~ " sources)" if group.status == "corroborated" else "Single source" }}</span>
+          {% for claim in group.claims %}
+          <div class="claim-item">
+            <span class="source-tag">{{ claim.source }}</span>
+            <a href="{{ claim.url }}" target="_blank" rel="noopener">{{ claim.sentence }}</a>
+          </div>
+          {% endfor %}
+        </div>
+        {% endfor %}
+      </details>
       {% endif %}
       <details class="sources">
         <summary>{{ story.source_articles|length }} source{{ "s" if story.source_articles|length != 1 else "" }}</summary>

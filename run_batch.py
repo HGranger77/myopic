@@ -50,6 +50,10 @@ MAX_STORY_TEXT_CHARS = 8000  # keeps a many-source story's combined text bounded
 # a source's full homepage on first discovery) in one go. Untranslated
 # articles just wait for a later run - set low (5) for initial validation of
 # the stage itself, not tuned for throughput yet.
+# cosine distance under which two sentences from different sources count as
+# the same claim - looser than STORY_MAX_DISTANCE's whole-article threshold
+# would be wrong here; short sentences with the same figure sit very close.
+CLAIM_MAX_DISTANCE = float(os.environ.get("MYOPIC_CLAIM_MAX_DISTANCE", "0.25"))
 TRANSLATE_MAX_ARTICLES = int(os.environ.get("MYOPIC_TRANSLATE_MAX_ARTICLES", "5"))
 
 
@@ -375,6 +379,52 @@ def article_entities(run_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# check-claims (one task, spaCy + embedding model, relevant articles still
+# missing claim extraction)
+#
+# Step one of fact checking: pull figure/quote-bearing sentences out of each
+# relevant article (one-shot per article), then regroup the claims of every
+# story that gained new ones, flagging each group corroborated (2+ sources
+# say it) or single-source. Agreement between outlets, not a truth verdict -
+# see nlp/claims.py.
+# ---------------------------------------------------------------------------
+
+def check_claims(run_id: int) -> int:
+    # run_id unused - gap-based worklist, see sentiment_article()'s comment.
+    from nlp.claims import extract_claim_sentences, group_claims
+    from nlp.embedding import embed
+
+    todo = ops.get_relevant_articles_missing_claims()
+    story_ids = set()
+    done = 0
+    for i, row in enumerate(todo, start=1):
+        try:
+            article = ops.get_article(row["article_id"])
+            sentences = extract_claim_sentences(article["body_text"])
+            ops.insert_claims(
+                article["id"], [{"sentence": s, "embedding": embed(s)} for s in sentences]
+            )
+            story_ids.add(row["story_id"])
+            done += 1
+            print(f"[check-claims] {i}/{len(todo)} article {article['id']}: {len(sentences)} claims")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[check-claims] {i}/{len(todo)} failed for article "
+                  f"{row['article_id']}: {exc}", file=sys.stderr)
+
+    for story_id in sorted(story_ids):
+        claims = ops.get_story_claims(story_id)
+        groups = group_claims(
+            [{**c, "embedding": list(c["embedding"])} for c in claims], CLAIM_MAX_DISTANCE
+        )
+        ops.replace_story_claim_groups(story_id, groups)
+        corroborated = sum(g["status"] == "corroborated" for g in groups)
+        print(f"[check-claims] story {story_id}: {len(groups)} claim groups, {corroborated} corroborated")
+
+    print(f"[check-claims] processed {done}/{len(todo)} articles, regrouped {len(story_ids)} stories")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # finalize (one task, no model, DB accounting)
 # ---------------------------------------------------------------------------
 
@@ -422,7 +472,7 @@ def _parse_args() -> argparse.Namespace:
     for name in ["fetch-article-bodies", "translate-article", "embed-article"]:
         sub.add_parser(name)
 
-    for name in ["cluster-stories", "summarize-story", "tag-relevance", "sentiment-article", "article-entities", "finalize"]:
+    for name in ["cluster-stories", "summarize-story", "tag-relevance", "sentiment-article", "article-entities", "check-claims", "finalize"]:
         p = sub.add_parser(name)
         p.add_argument("--run-id", type=int, required=True)
 
@@ -454,6 +504,8 @@ def main() -> int:
             return sentiment_article(args.run_id)
         if args.command == "article-entities":
             return article_entities(args.run_id)
+        if args.command == "check-claims":
+            return check_claims(args.run_id)
         if args.command == "finalize":
             return finalize(args.run_id)
         raise AssertionError(f"unhandled command: {args.command}")

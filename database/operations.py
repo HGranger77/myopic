@@ -913,3 +913,104 @@ def get_story_source_articles(story_id: int) -> list[dict]:
                 (story_id,),
             )
             return [dict(row) for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# claims / claim_groups - check-claims
+# ---------------------------------------------------------------------------
+
+def get_relevant_articles_missing_claims() -> list[dict]:
+    """Relevant, fetched articles check-claims hasn't processed yet - gap-based
+    on claims_checked_at (not "has claim rows") for the same reason as
+    get_relevant_articles_missing_entities. Returns [{article_id, story_id}]."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id AS article_id, sa.story_id FROM articles a
+                JOIN story_articles sa ON sa.article_id = a.id
+                WHERE a.is_relevant = TRUE AND a.claims_checked_at IS NULL
+                AND a.body_text IS NOT NULL
+                """
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def insert_claims(article_id: int, claims: Iterable[dict]) -> None:
+    """claims: iterable of {sentence, embedding}. Replaces any existing rows
+    (safe to retry) and always stamps claims_checked_at, even for zero claims."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM claims WHERE article_id = %s", (article_id,))
+            for claim in claims:
+                cur.execute(
+                    "INSERT INTO claims (article_id, sentence, embedding) VALUES (%s, %s, %s)",
+                    (article_id, claim["sentence"], claim["embedding"]),
+                )
+            cur.execute("UPDATE articles SET claims_checked_at = now() WHERE id = %s", (article_id,))
+
+
+def get_story_claims(story_id: int) -> list[dict]:
+    """Every claim from a story's member articles, with its source and
+    embedding (a numpy array, via pgvector) - group_claims' input."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id, c.article_id, c.sentence, c.embedding, a.source
+                FROM claims c
+                JOIN articles a ON a.id = c.article_id
+                JOIN story_articles sa ON sa.article_id = a.id
+                WHERE sa.story_id = %s
+                ORDER BY c.id
+                """,
+                (story_id,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def replace_story_claim_groups(story_id: int, groups: Iterable[dict]) -> None:
+    """groups: iterable of {claim_ids, source_count, status}."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM claim_groups WHERE story_id = %s", (story_id,))
+            for group in groups:
+                cur.execute(
+                    "INSERT INTO claim_groups (story_id, status, source_count) VALUES (%s, %s, %s) RETURNING id",
+                    (story_id, group["status"], group["source_count"]),
+                )
+                group_id = cur.fetchone()["id"]
+                for claim_id in group["claim_ids"]:
+                    cur.execute(
+                        "INSERT INTO claim_group_members (claim_group_id, claim_id) VALUES (%s, %s)",
+                        (group_id, claim_id),
+                    )
+
+
+def get_story_claim_groups(story_id: int) -> list[dict]:
+    """Corroborated groups first, then by size. Each:
+    {id, status, source_count, claims: [{sentence, source, url}]}."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cg.id, cg.status, cg.source_count,
+                       c.sentence, a.source, a.url
+                FROM claim_groups cg
+                JOIN claim_group_members m ON m.claim_group_id = cg.id
+                JOIN claims c ON c.id = m.claim_id
+                JOIN articles a ON a.id = c.article_id
+                WHERE cg.story_id = %s
+                ORDER BY (cg.status = 'corroborated') DESC, cg.source_count DESC, cg.id, c.id
+                """,
+                (story_id,),
+            )
+            rows = cur.fetchall()
+    groups: dict[int, dict] = {}
+    for row in rows:
+        group = groups.setdefault(
+            row["id"],
+            {"id": row["id"], "status": row["status"], "source_count": row["source_count"], "claims": []},
+        )
+        group["claims"].append({"sentence": row["sentence"], "source": row["source"], "url": row["url"]})
+    return list(groups.values())

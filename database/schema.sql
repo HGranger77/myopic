@@ -75,6 +75,9 @@ CREATE TABLE IF NOT EXISTS articles (
     -- gated it - see get_articles_needing_embedding's docstring), so that
     -- version kept reprocessing the same zero-entity articles every run.
     entities_checked_at TIMESTAMPTZ,
+    -- Same idea as entities_checked_at, for check-claims: stamped whenever
+    -- claim extraction ran on this article, even if it found zero candidates.
+    claims_checked_at   TIMESTAMPTZ,
     first_seen_run_id  INTEGER REFERENCES scrape_runs(id),
     last_seen_run_id   INTEGER REFERENCES scrape_runs(id),
     discovered_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -163,3 +166,37 @@ CREATE TABLE IF NOT EXISTS article_sentiment (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_article_sentiment_story ON article_sentiment(story_id);
+
+-- Existing databases predate this column (CREATE TABLE IF NOT EXISTS above
+-- won't add it).
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS claims_checked_at TIMESTAMPTZ;
+
+-- Step one of fact checking: sentences from an article that carry a figure or
+-- a quotation (see nlp/claims.py), embedded so check-claims can group
+-- equivalent claims across a story's sources. One-shot per article.
+CREATE TABLE IF NOT EXISTS claims (
+    id          SERIAL PRIMARY KEY,
+    article_id  INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    sentence    TEXT NOT NULL,
+    embedding   vector(384),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_claims_article ON claims(article_id);
+
+-- Regenerated (delete + reinsert) for a story whenever check-claims runs on
+-- it, like story_summaries - groups depend on the story's full membership.
+-- Agreement between sources, not a truth verdict.
+CREATE TABLE IF NOT EXISTS claim_groups (
+    id            SERIAL PRIMARY KEY,
+    story_id      INTEGER NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+    status        TEXT NOT NULL CHECK (status IN ('corroborated', 'single_source')),
+    source_count  INTEGER NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_claim_groups_story ON claim_groups(story_id);
+
+CREATE TABLE IF NOT EXISTS claim_group_members (
+    claim_group_id  INTEGER NOT NULL REFERENCES claim_groups(id) ON DELETE CASCADE,
+    claim_id        INTEGER NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    PRIMARY KEY (claim_group_id, claim_id)
+);
