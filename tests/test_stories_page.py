@@ -350,3 +350,48 @@ def test_stories_page_topic_counts_reflect_active_search():
 
     resp_filtered = client.get("/stories?q=grand+final")
     assert ">AFL (1)<" in resp_filtered.text
+
+
+def test_map_page_shows_located_story():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0)
+    resp = client.get("/map")
+    assert resp.status_code == 200
+    assert "Biden announces policy" in resp.text
+    assert "Washington" in resp.text
+    assert "38.9" in resp.text
+
+
+def test_map_page_excludes_story_without_coordinates():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, None, None, None)
+    resp = client.get("/map")
+    assert resp.status_code == 200
+    assert "Biden announces policy" not in resp.text
+    assert "No located stories" in resp.text
+
+
+def test_story_location_candidates_ranked_by_article_count():
+    story_id, article_id = _seed_matched_story()
+    ops.insert_article_entities(article_id, [
+        {"text": "Washington", "normalized_text": "washington", "label": "GPE", "start_char": 0, "end_char": 10},
+    ])
+    assert ops.get_story_location_candidates(story_id) == ["Washington"]
+
+
+def test_geolocate_story_stage_uses_cache_and_stamps_story(monkeypatch):
+    import nlp.geocode
+    import run_batch
+
+    story_id, article_id = _seed_matched_story()
+    ops.insert_article_entities(article_id, [
+        {"text": "Washington", "normalized_text": "washington", "label": "GPE", "start_char": 0, "end_char": 10},
+    ])
+    ops.set_article_relevance(article_id, True)
+    calls = []
+    monkeypatch.setattr(nlp.geocode, "geocode", lambda p: calls.append(p) or {"lat": 1.5, "lon": 2.5, "display_name": p})
+    assert run_batch.geolocate_story(1) == 0
+    assert calls == ["Washington"]
+    assert ops.get_cached_geocode("washington")["lat"] == 1.5
+    assert [m["location_text"] for m in ops.get_map_stories()] == ["Washington"]
+    assert ops.get_relevant_stories_missing_location() == []

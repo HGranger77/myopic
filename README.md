@@ -87,3 +87,10 @@ topic, with a live count of how many stories currently match each one.
 ## Documentation
 
 See [DEV.md](DEV.md) for local development, Docker, Kubernetes deployment, and monitoring setup.
+
+### Map view
+
+`geolocate-story` (after `article-entities`) picks each relevant story's most-mentioned place from
+its articles' GPE/LOC entities and geocodes it via Nominatim (cached in `geocode_cache`; override
+the endpoint with `MYOPIC_GEOCODER_URL`). `/map` shows a day's located stories as icons on a
+Leaflet map (`/map?date=YYYY-MM-DD`).

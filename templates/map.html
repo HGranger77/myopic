@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>myopic — story map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5; --text: #1a1a1a; --muted: #6b6b6b; --accent: #2f5fd6; --border: #e4e4e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15161a; --text: #ececea; --muted: #9a9a9a; --accent: #7fa0ff; --border: #2d2e34; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; }
+  .page { max-width: 1080px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  h1 { margin: 0 0 .25rem; }
+  .sub { color: var(--muted); margin: 0 0 1rem; }
+  .toolbar { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  .toolbar a { color: var(--accent); text-decoration: none; }
+  .toolbar input { padding: .35rem .5rem; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); }
+  #map { height: 65vh; min-height: 360px; border: 1px solid var(--border); border-radius: 8px; }
+  .popup-loc { color: #6b6b6b; font-size: .85em; margin: 0 0 .25rem; }
+  .story-pin { font-size: 26px; line-height: 26px; text-align: center; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .empty { color: var(--muted); margin-top: 1rem; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Story map</h1>
+  <p class="sub">Where each day's reportable stories took place.</p>
+  <div class="toolbar">
+    <a href="/stories">&larr; Stories</a>
+    <form method="get" action="/map">
+      <input type="date" name="date" value="{{ date or '' }}" onchange="this.form.submit()">
+    </form>
+    <span class="sub" style="margin:0">{{ story_count }} located stor{{ 'y' if story_count == 1 else 'ies' }}</span>
+  </div>
+  <div id="map"></div>
+  {% if not markers %}<p class="empty">No located stories for this day.</p>{% endif %}
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+  const markers = {{ markers | tojson }};
+  const map = L.map("map").setView([20, 0], 2);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  }).addTo(map);
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const icon = L.divIcon({ className: "story-pin", html: "📰", iconSize: [26, 26], iconAnchor: [13, 13], popupAnchor: [0, -12] });
+
+  // Stories in the same place share coordinates - fan them out slightly so
+  // every icon stays visible and clickable.
+  const seen = {};
+  const bounds = [];
+  markers.forEach((m) => {
+    const key = m.lat.toFixed(3) + "," + m.lon.toFixed(3);
+    const n = (seen[key] = (seen[key] || 0) + 1) - 1;
+    const angle = n * 2.4, r = n ? 0.03 * Math.sqrt(n) : 0;
+    const pos = [m.lat + r * Math.sin(angle), m.lon + r * Math.cos(angle)];
+    bounds.push(pos);
+    L.marker(pos, { icon, title: m.headline || "" }).addTo(map).bindPopup(
+      `<p class="popup-loc">${esc(m.location)}${m.topics.length ? " · " + esc(m.topics.join(", ")) : ""}</p>` +
+      `<strong>${esc(m.headline)}</strong><p>${esc(m.summary)}</p>`,
+      { maxWidth: 320 }
+    );
+  });
+  if (bounds.length) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 6 });
+</script>
+</body>
+</html>

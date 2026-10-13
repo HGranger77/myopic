@@ -303,6 +303,34 @@ spec:
       inputs:
         parameters:
         - name: run-id
+    - name: geolocate-story
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - geolocate-story
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: 300m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+      inputs:
+        parameters:
+        - name: run-id
     - name: finalize
       container:
         image: myopic-batch:latest
@@ -406,11 +434,19 @@ spec:
             parameters:
             - name: run-id
               value: '{{tasks.start-run.outputs.parameters.run-id}}'
+        - name: geolocate-story
+          template: geolocate-story
+          dependencies:
+          - article-entities
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
         - name: finalize
           template: finalize
           dependencies:
           - sentiment-article
-          - article-entities
+          - geolocate-story
           arguments:
             parameters:
             - name: run-id

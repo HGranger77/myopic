@@ -913,3 +913,131 @@ def get_story_source_articles(story_id: int) -> list[dict]:
                 (story_id,),
             )
             return [dict(row) for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# geolocation / map view
+# ---------------------------------------------------------------------------
+
+def get_relevant_stories_missing_location() -> list[int]:
+    """Relevant stories geolocate-story hasn't checked yet - its worklist.
+    Gap-based (a story_locations row, even an empty one, marks it done)."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT sa.story_id
+                FROM story_articles sa
+                JOIN articles a ON a.id = sa.article_id
+                WHERE a.is_relevant = TRUE
+                AND NOT EXISTS (SELECT 1 FROM story_locations sl WHERE sl.story_id = sa.story_id)
+                """
+            )
+            return [row["story_id"] for row in cur.fetchall()]
+
+
+def get_story_location_candidates(story_id: int) -> list[str]:
+    """Place names for a story, best guess first: the significant GPE/LOC
+    entities of each member article (see get_article_entities), ranked by how
+    many of the story's articles mention them. Exact case-insensitive
+    matching, like the /stories page's common-entities logic."""
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+    order: list[str] = []
+    for article in get_story_articles(story_id):
+        for place in get_article_entities(article["id"])["locations"]:
+            key = place.lower()
+            if key not in counts:
+                display[key] = place
+                order.append(key)
+            counts[key] = counts.get(key, 0) + 1
+    order.sort(key=lambda k: -counts[k])  # stable: ties keep first-seen order
+    return [display[k] for k in order]
+
+
+def get_cached_geocode(query: str) -> Optional[dict]:
+    """None if never looked up; otherwise {lat, lon, display_name}, with
+    lat/lon None for a cached "not found"."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT lat, lon, display_name FROM geocode_cache WHERE query = %s", (query.lower(),)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def set_cached_geocode(query: str, result: Optional[dict]) -> None:
+    result = result or {}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO geocode_cache (query, lat, lon, display_name) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (query) DO UPDATE
+                SET lat = EXCLUDED.lat, lon = EXCLUDED.lon, display_name = EXCLUDED.display_name
+                """,
+                (query.lower(), result.get("lat"), result.get("lon"), result.get("display_name")),
+            )
+
+
+def upsert_story_location(
+    story_id: int, location_text: Optional[str], lat: Optional[float], lon: Optional[float]
+) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO story_locations (story_id, location_text, lat, lon) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (story_id) DO UPDATE
+                SET location_text = EXCLUDED.location_text, lat = EXCLUDED.lat, lon = EXCLUDED.lon
+                """,
+                (story_id, location_text, lat, lon),
+            )
+
+
+def get_map_stories(date: Optional[str] = None) -> list[dict]:
+    """Located, relevant, summarized stories (optionally last updated on one
+    'YYYY-MM-DD' day) for the /map page. [{story_id, summary_text,
+    location_text, lat, lon, updated_at, topics, headline}, ...] - headline
+    is the story's earliest-discovered article's."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.id AS story_id, s.updated_at, ss.summary_text,
+                       sl.location_text, sl.lat, sl.lon,
+                       (SELECT a.headline FROM story_articles sa
+                        JOIN articles a ON a.id = sa.article_id
+                        WHERE sa.story_id = s.id ORDER BY a.discovered_at LIMIT 1) AS headline,
+                       ARRAY(SELECT DISTINCT we.canonical_name FROM story_articles sa
+                             JOIN watchlist_matches wm ON wm.article_id = sa.article_id
+                             JOIN watchlist_entities we ON we.id = wm.watchlist_entity_id
+                             WHERE sa.story_id = s.id) AS topics
+                FROM stories s
+                JOIN story_summaries ss ON ss.story_id = s.id
+                JOIN story_locations sl ON sl.story_id = s.id
+                WHERE sl.lat IS NOT NULL AND sl.lon IS NOT NULL
+                AND EXISTS (SELECT 1 FROM story_articles sa
+                            JOIN watchlist_matches wm ON wm.article_id = sa.article_id
+                            WHERE sa.story_id = s.id)
+                AND (%(date)s IS NULL OR s.updated_at::date = %(date)s::date)
+                ORDER BY s.updated_at DESC
+                """,
+                {"date": date},
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_latest_map_date():
+    """Most recent day with a mappable story, or None."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT max(s.updated_at::date) AS day FROM stories s
+                JOIN story_locations sl ON sl.story_id = s.id
+                WHERE sl.lat IS NOT NULL
+                """
+            )
+            return cur.fetchone()["day"]

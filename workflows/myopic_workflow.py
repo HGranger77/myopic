@@ -220,6 +220,18 @@ with CronWorkflow(
         resources=Resources(cpu_request="200m", cpu_limit="500m", memory_request="512Mi", memory_limit="768Mi"),
     )
 
+    geolocate_story = Container(
+        name="geolocate-story",
+        image=IMAGE,
+        image_pull_policy="Never",
+        command=["python", "run_batch.py", "geolocate-story", "--run-id", "{{inputs.parameters.run-id}}"],
+        inputs=[Parameter(name="run-id")],
+        env=ENV,
+        env_from=ENV_FROM,
+        # No model - just throttled (1 req/s) geocoder HTTP calls, cached in Postgres.
+        resources=Resources(cpu_request="100m", cpu_limit="300m", memory_request="128Mi", memory_limit="256Mi"),
+    )
+
     finalize = Container(
         name="finalize",
         image=IMAGE,
@@ -257,10 +269,12 @@ with CronWorkflow(
         sa = sentiment_article(name="sentiment-article", arguments=_run_id_arg(), dependencies=["tag-relevance"])
         ae = article_entities(name="article-entities", arguments=_run_id_arg(), dependencies=["tag-relevance"])
 
+        gs = geolocate_story(name="geolocate-story", arguments=_run_id_arg(), dependencies=["article-entities"])
+
         fin = finalize(
             name="finalize",
             arguments=_run_id_arg(),
-            dependencies=["sentiment-article", "article-entities"],
+            dependencies=["sentiment-article", "geolocate-story"],
         )
 
 

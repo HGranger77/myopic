@@ -375,6 +375,53 @@ def article_entities(run_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# geolocate-story (one task, geocoder HTTP calls, loop over relevant stories
+# still missing a location)
+#
+# A story's location is its most-mentioned significant place (GPE/LOC)
+# across member articles' NER output, so this runs after article-entities.
+# Candidates are tried in rank order until one geocodes. Always writes a
+# story_locations row (lat/lon NULL if nothing resolved) so the story isn't
+# retried every run. A network failure is NOT recorded - the story stays on
+# the worklist for the next run.
+# ---------------------------------------------------------------------------
+
+MAX_GEOCODE_CANDIDATES = 3
+
+
+def geolocate_story(run_id: int) -> int:
+    # run_id unused - gap-based worklist, see sentiment_article()'s comment.
+    from nlp.geocode import geocode
+
+    todo = ops.get_relevant_stories_missing_location()
+    located = 0
+    for i, story_id in enumerate(todo, start=1):
+        try:
+            found = None
+            for place in ops.get_story_location_candidates(story_id)[:MAX_GEOCODE_CANDIDATES]:
+                cached = ops.get_cached_geocode(place)
+                if cached is None:
+                    result = geocode(place)
+                    ops.set_cached_geocode(place, result)
+                    cached = result or {}
+                if cached.get("lat") is not None:
+                    found = (place, cached["lat"], cached["lon"])
+                    break
+            if found:
+                ops.upsert_story_location(story_id, *found)
+                located += 1
+                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: {found[0]}")
+            else:
+                ops.upsert_story_location(story_id, None, None, None)
+                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: no location found")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[geolocate-story] {i}/{len(todo)} failed for story {story_id}: {exc}", file=sys.stderr)
+
+    print(f"[geolocate-story] located {located}/{len(todo)} stories")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # finalize (one task, no model, DB accounting)
 # ---------------------------------------------------------------------------
 
@@ -422,7 +469,7 @@ def _parse_args() -> argparse.Namespace:
     for name in ["fetch-article-bodies", "translate-article", "embed-article"]:
         sub.add_parser(name)
 
-    for name in ["cluster-stories", "summarize-story", "tag-relevance", "sentiment-article", "article-entities", "finalize"]:
+    for name in ["cluster-stories", "summarize-story", "tag-relevance", "sentiment-article", "article-entities", "geolocate-story", "finalize"]:
         p = sub.add_parser(name)
         p.add_argument("--run-id", type=int, required=True)
 
@@ -454,6 +501,8 @@ def main() -> int:
             return sentiment_article(args.run_id)
         if args.command == "article-entities":
             return article_entities(args.run_id)
+        if args.command == "geolocate-story":
+            return geolocate_story(args.run_id)
         if args.command == "finalize":
             return finalize(args.run_id)
         raise AssertionError(f"unhandled command: {args.command}")

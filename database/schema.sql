@@ -163,3 +163,28 @@ CREATE TABLE IF NOT EXISTS article_sentiment (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_article_sentiment_story ON article_sentiment(story_id);
+
+-- Cache of place-name -> coordinates lookups (nlp/geocode.py), keyed by the
+-- normalized query text. Negative results (lat/lon NULL) are cached too, so
+-- a place the geocoder can't resolve isn't re-queried on every run.
+CREATE TABLE IF NOT EXISTS geocode_cache (
+    id            SERIAL PRIMARY KEY,
+    query         TEXT NOT NULL UNIQUE,
+    lat           DOUBLE PRECISION,
+    lon           DOUBLE PRECISION,
+    display_name  TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Where a story took place - one row per story, stamped by the
+-- geolocate-story stage even when no location could be found (lat/lon
+-- NULL), so "never checked" and "checked, nothing found" are distinguishable
+-- (same reasoning as articles.entities_checked_at). Powers the /map page.
+CREATE TABLE IF NOT EXISTS story_locations (
+    id             SERIAL PRIMARY KEY,
+    story_id       INTEGER NOT NULL UNIQUE REFERENCES stories(id) ON DELETE CASCADE,
+    location_text  TEXT,
+    lat            DOUBLE PRECISION,
+    lon            DOUBLE PRECISION,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
