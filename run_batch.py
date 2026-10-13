@@ -41,8 +41,13 @@ from scraper.registry import get_source
 
 CONFIG_PATH = Path(__file__).parent / "config" / "sources.yaml"
 
-STORY_WINDOW_DAYS = int(os.environ.get("MYOPIC_STORY_WINDOW_DAYS", "14"))
-STORY_MAX_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_DISTANCE", "0.3"))
+# Articles only join a story whose members were discovered within this many
+# hours either side of them; a story must also pass BOTH distance checks
+# (nearest member, and centroid of the in-window members) - see
+# ops.find_similar_story.
+STORY_WINDOW_HOURS = float(os.environ.get("MYOPIC_STORY_WINDOW_HOURS", "24"))
+STORY_MAX_NEAREST_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_NEAREST_DISTANCE", "0.25"))
+STORY_MAX_CENTROID_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_CENTROID_DISTANCE", "0.35"))
 FETCH_CONCURRENCY = int(os.environ.get("MYOPIC_FETCH_CONCURRENCY", "8"))
 MAX_STORY_TEXT_CHARS = 8000  # keeps a many-source story's combined text bounded
 # translate-article is autoregressive (see nlp/translate.py) - at ~60s/article
@@ -222,7 +227,10 @@ def cluster_stories(run_id: int) -> int:
     new_stories = 0
     joined_stories = 0
     for i, article in enumerate(to_cluster, start=1):
-        story_id = ops.find_similar_story(article["embedding"], STORY_WINDOW_DAYS, STORY_MAX_DISTANCE)
+        story_id = ops.find_similar_story(
+            article["embedding"], article["discovered_at"], STORY_WINDOW_HOURS,
+            STORY_MAX_NEAREST_DISTANCE, STORY_MAX_CENTROID_DISTANCE,
+        )
         if story_id is None:
             story_id = ops.create_story()
             new_stories += 1

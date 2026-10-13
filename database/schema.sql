@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS watchlist_matches (
 -- A story is a cluster of articles (possibly from different sources, possibly
 -- discovered on different days) judged to be reporting on the same underlying
 -- event. cluster-stories compares each newly-embedded relevant article
--- against stories touched within a rolling window (see MYOPIC_STORY_WINDOW_DAYS)
+-- against stories with members discovered within +/- MYOPIC_STORY_WINDOW_HOURS
 -- and either attaches it to an existing story or starts a new one.
 CREATE TABLE IF NOT EXISTS stories (
     id          SERIAL PRIMARY KEY,
