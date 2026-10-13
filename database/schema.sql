@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS articles (
     discovered_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     fetched_at         TIMESTAMPTZ
 );
+-- filled in by tag-relevance: is this article's story a fluff piece (gossip,
+-- listicle, lifestyle) with little real information? Fluff is never marked
+-- is_relevant, so sentiment/NER skip it; kept as its own column so the UI
+-- can still show or hide it.
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS is_fluff BOOLEAN;
 CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source);
 -- HNSW supports incremental inserts well, unlike IVFFlat (which wants a
 -- representative sample up front) - a better fit for a table that grows by

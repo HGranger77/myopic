@@ -356,6 +356,12 @@ def set_article_relevance(article_id: int, is_relevant: bool) -> None:
             )
 
 
+def set_article_fluff(article_id: int, is_fluff: bool) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE articles SET is_fluff = %s WHERE id = %s", (is_fluff, article_id))
+
+
 def delete_watchlist_matches(article_id: int) -> None:
     """Clears prior matches for an article before reprocessing it - makes
     tag-relevance safe to retry without duplicating rows."""
