@@ -281,6 +281,7 @@ def summarize_story(run_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 def tag_relevance(run_id: int) -> int:
+    from nlp.fluff import is_fluff
     from nlp.tagging import check_relevance
 
     watchlist = ops.get_active_watchlist_with_aliases()
@@ -290,7 +291,11 @@ def tag_relevance(run_id: int) -> int:
         summary_text = ops.get_story_summary_text(story_id)
         member_articles = ops.get_story_articles(story_id)
 
-        matches = check_relevance(summary_text, watchlist) if watchlist and summary_text else []
+        # Fluff stories (gossip, listicles, lifestyle) are never relevant,
+        # even if they match a watchlist topic - no point paying for
+        # sentiment/NER on them. Checked first so we skip the watchlist call.
+        fluff = bool(summary_text) and is_fluff(summary_text)
+        matches = [] if fluff or not watchlist or not summary_text else check_relevance(summary_text, watchlist)
         is_relevant = len(matches) > 0
 
         for article in member_articles:
@@ -301,9 +306,10 @@ def tag_relevance(run_id: int) -> int:
                     None, match["canonical_name"], run_id,
                 )
             ops.set_article_relevance(article["id"], is_relevant)
+            ops.set_article_fluff(article["id"], fluff)
 
         relevant += int(is_relevant)
-        verdict = "RELEVANT (" + ", ".join(m["canonical_name"] for m in matches) + ")" if matches else "not relevant"
+        verdict = "FLUFF" if fluff else "RELEVANT (" + ", ".join(m["canonical_name"] for m in matches) + ")" if matches else "not relevant"
         print(f"[tag-relevance] {i}/{len(touched)} story {story_id} "
               f"({len(member_articles)} articles): {verdict}")
 
