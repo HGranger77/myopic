@@ -489,7 +489,7 @@ def find_similar_story(
                 GROUP BY sa.story_id
                 HAVING MIN(a.embedding <=> %(emb)s::vector) <= %(max_nearest)s
                    AND AVG(a.embedding) <=> %(emb)s::vector <= %(max_centroid)s
-                ORDER BY nearest + centroid ASC
+                ORDER BY MIN(a.embedding <=> %(emb)s::vector) + (AVG(a.embedding) <=> %(emb)s::vector) ASC
                 LIMIT 1
                 """,
                 {
