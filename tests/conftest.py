@@ -6,6 +6,9 @@ load_dotenv()
 from database import get_connection, init_db  # noqa: E402
 
 _TABLES = [
+    "claim_group_members",
+    "claim_groups",
+    "claims",
     "article_sentiment",
     "story_summaries",
     "story_articles",

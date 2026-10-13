@@ -137,6 +137,8 @@ def stories_page(
         for article in story["source_articles"]:
             article["entities"] = ops.get_article_entities(article["id"])
         story["common_entities"] = _common_entities(story["source_articles"])
+        story["claim_groups"] = ops.get_story_claim_groups(story["story_id"])
+        story["corroborated_count"] = sum(g["status"] == "corroborated" for g in story["claim_groups"])
     # Queried live, every request - any watchlist entity added via the API
     # shows up here (alphabetically, by canonical_name, with a live match
     # count) on the very next page load, no caching or redeploy needed.

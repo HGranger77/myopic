@@ -220,6 +220,19 @@ with CronWorkflow(
         resources=Resources(cpu_request="200m", cpu_limit="500m", memory_request="512Mi", memory_limit="768Mi"),
     )
 
+    check_claims = Container(
+        name="check-claims",
+        image=IMAGE,
+        image_pull_policy="Never",
+        command=["python", "run_batch.py", "check-claims", "--run-id", "{{inputs.parameters.run-id}}"],
+        inputs=[Parameter(name="run-id")],
+        env=ENV,
+        env_from=ENV_FROM,
+        # spaCy sentence split + MiniLM embedding of each claim sentence. Runs
+        # CONCURRENTLY with sentiment-article/article-entities.
+        resources=Resources(cpu_request="500m", cpu_limit="1", memory_request="768Mi", memory_limit="1Gi"),
+    )
+
     finalize = Container(
         name="finalize",
         image=IMAGE,
@@ -257,10 +270,12 @@ with CronWorkflow(
         sa = sentiment_article(name="sentiment-article", arguments=_run_id_arg(), dependencies=["tag-relevance"])
         ae = article_entities(name="article-entities", arguments=_run_id_arg(), dependencies=["tag-relevance"])
 
+        cc = check_claims(name="check-claims", arguments=_run_id_arg(), dependencies=["tag-relevance"])
+
         fin = finalize(
             name="finalize",
             arguments=_run_id_arg(),
-            dependencies=["sentiment-article", "article-entities"],
+            dependencies=["sentiment-article", "article-entities", "check-claims"],
         )
 
 
