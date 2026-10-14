@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>myopic — story map</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.min.css">
 <style>
   :root {
     color-scheme: light dark;
@@ -47,6 +49,7 @@
   {% if not markers %}<p class="empty">No located stories for this day.</p>{% endif %}
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
 <script>
   const markers = {{ markers | tojson }};
   const map = L.map("map").setView([20, 0], 2);
@@ -61,27 +64,25 @@
 
   const approxIcon = L.divIcon({ className: "story-pin approx", html: PIN_SVG, iconSize: [26, 26], iconAnchor: [13, 13], popupAnchor: [0, -12] });
 
-  // Stories in the same place share coordinates - fan them out slightly so
-  // every icon stays visible and clickable.
-  const seen = {};
+  // Nearby stories collapse into a count badge; clicking one zooms in, and
+  // stories at the exact same coordinates spiderfy apart at max zoom.
+  const cluster = L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 45 });
   const bounds = [];
   markers.forEach((m) => {
-    const key = m.lat.toFixed(3) + "," + m.lon.toFixed(3);
-    const n = (seen[key] = (seen[key] || 0) + 1) - 1;
-    const angle = n * 2.4, r = n ? 0.03 * Math.sqrt(n) : 0;
-    const pos = [m.lat + r * Math.sin(angle), m.lon + r * Math.cos(angle)];
+    const pos = [m.lat, m.lon];
     bounds.push(pos);
     if (!m.precise) {
-      // Vague place (country/state/continent): faded pin + dashed circle for the approximate area.
-      L.circle([m.lat, m.lon], { radius: Math.min(m.radius_km || 200, 1500) * 1000, color: "#2f5fd6",
+      // Vague place (country/state/continent): dashed circle for the approximate area.
+      L.circle(pos, { radius: Math.min(m.radius_km || 200, 1500) * 1000, color: "#2f5fd6",
         weight: 1, dashArray: "5 5", fillOpacity: 0.06, interactive: false }).addTo(map);
     }
-    L.marker(pos, { icon: m.precise ? icon : approxIcon, title: m.headline || "" }).addTo(map).bindPopup(
+    cluster.addLayer(L.marker(pos, { icon: m.precise ? icon : approxIcon, title: m.headline || "" }).bindPopup(
       `<p class="popup-loc">${esc(m.location)}${m.precise ? "" : " (approximate)"}${m.topics.length ? " · " + esc(m.topics.join(", ")) : ""}</p>` +
       `<strong>${esc(m.headline)}</strong><p>${esc(m.summary)}</p>`,
       { maxWidth: 320 }
-    );
+    ));
   });
+  map.addLayer(cluster);
   if (bounds.length) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 6 });
 </script>
 </body>
