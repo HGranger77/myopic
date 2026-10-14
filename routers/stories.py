@@ -133,6 +133,8 @@ def stories_page(
         # matched_entities is display text here, never compared against
         # anything (the topic query param matches raw canonical_name in SQL).
         story["matched_entities"] = [_display_name(e) for e in story["matched_entities"] if e]
+        if story["located"]:
+            story["map_href"] = f"/map{_query_string(date=story['updated_at'].date().isoformat(), story=story['story_id'])}"
         story["source_articles"] = ops.get_story_source_articles(story["story_id"])
         for article in story["source_articles"]:
             article["entities"] = ops.get_article_entities(article["id"])

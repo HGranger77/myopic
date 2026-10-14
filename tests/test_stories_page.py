@@ -415,3 +415,21 @@ def test_pick_location_prefers_precise_over_vague_and_skips_non_places(monkeypat
     # only a vague place available -> approximate, with its radius
     assert run_batch._pick_location(["Australia"]) == ("Australia", 1.0, 2.0, False, 2000)
     assert run_batch._pick_location(["n't"]) is None
+
+
+def test_stories_page_links_located_story_to_map_and_has_tabs():
+    story_id, _ = _seed_matched_story()
+    unlocated_id, _ = _seed_matched_story(entity_name="Other", url="https://www.nine.com.au/x.html")
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get("/stories").text
+    assert f"/map?date=" in html and f"story={story_id}" in html
+    assert f"story={unlocated_id}" not in html  # no pin icon without a location
+    assert 'href="/map"' in html and 'aria-current="page">Articles' in html
+
+
+def test_map_page_has_tabs_and_focus_story():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get(f"/map?story={story_id}").text
+    assert 'aria-current="page">Map' in html
+    assert f"const focusStory = {story_id};" in html

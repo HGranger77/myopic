@@ -11,7 +11,7 @@ templates = Jinja2Templates(directory="templates")
 
 
 @router.get("/map", response_class=HTMLResponse)
-def map_page(request: Request, date: Optional[str] = None):
+def map_page(request: Request, date: Optional[str] = None, story: Optional[int] = None):
     """One day's located stories as map markers. With no ?date, shows the most
     recent day that has any mappable story."""
     if date is None:
@@ -33,5 +33,5 @@ def map_page(request: Request, date: Optional[str] = None):
         for s in stories
     ]
     return templates.TemplateResponse(
-        request, "map.html", {"date": date, "markers": markers, "story_count": len(markers)}
+        request, "map.html", {"date": date, "markers": markers, "story_count": len(markers), "focus_story": story}
     )

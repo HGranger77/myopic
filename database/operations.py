@@ -790,9 +790,11 @@ def get_recent_stories_with_summaries(
                     s.id AS story_id, s.updated_at, ss.summary_text,
                     array_agg(DISTINCT a.source) AS sources,
                     array_agg(DISTINCT we.canonical_name) AS matched_entities,
+                    sl.location_text, (sl.lat IS NOT NULL) AS located,
                     count(*) OVER() AS total_count
                 FROM stories s
                 JOIN story_summaries ss ON ss.story_id = s.id
+                LEFT JOIN story_locations sl ON sl.story_id = s.id
                 JOIN story_articles sa ON sa.story_id = s.id
                 JOIN articles a ON a.id = sa.article_id
                 LEFT JOIN watchlist_matches wm ON wm.article_id = a.id
@@ -809,7 +811,7 @@ def get_recent_stories_with_summaries(
                     JOIN articles a3 ON a3.id = sa3.article_id
                     WHERE sa3.story_id = s.id AND a3.headline ILIKE '%%' || %(q)s || '%%'
                 ))
-                GROUP BY s.id, s.updated_at, ss.summary_text
+                GROUP BY s.id, s.updated_at, ss.summary_text, sl.location_text, sl.lat
                 HAVING count(wm.id) > 0
                 ORDER BY s.updated_at DESC
                 LIMIT %(limit)s OFFSET %(offset)s

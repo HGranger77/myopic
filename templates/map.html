@@ -30,6 +30,10 @@
   .story-pin { filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
   .story-pin.approx { opacity: .55; }
   .legend { color: var(--muted); font-size: .85rem; margin-top: .75rem; }
+  .tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--border); margin-bottom: 1.25rem; }
+  .tab { padding: .5rem 1rem; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
   .empty { color: var(--muted); margin-top: 1rem; }
 </style>
 </head>
@@ -37,8 +41,8 @@
 <div class="page">
   <h1>Story map</h1>
   <p class="sub">Where each day's reportable stories took place.</p>
+  {% with active="map", tab_date=date %}{% include "_tabs.html" %}{% endwith %}
   <div class="toolbar">
-    <a href="/stories">&larr; Stories</a>
     <form method="get" action="/map">
       <input type="date" name="date" value="{{ date or '' }}" onchange="this.form.submit()">
     </form>
@@ -67,6 +71,8 @@
   // Nearby stories collapse into a count badge; clicking one zooms in, and
   // stories at the exact same coordinates spiderfy apart at max zoom.
   const cluster = L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 45 });
+  const focusStory = {{ focus_story | tojson }};
+  let focusMarker = null;
   const bounds = [];
   markers.forEach((m) => {
     const pos = [m.lat, m.lon];
@@ -76,14 +82,20 @@
       L.circle(pos, { radius: Math.min(m.radius_km || 200, 1500) * 1000, color: "#2f5fd6",
         weight: 1, dashArray: "5 5", fillOpacity: 0.06, interactive: false }).addTo(map);
     }
-    cluster.addLayer(L.marker(pos, { icon: m.precise ? icon : approxIcon, title: m.headline || "" }).bindPopup(
+    const marker = L.marker(pos, { icon: m.precise ? icon : approxIcon, title: m.headline || "" }).bindPopup(
       `<p class="popup-loc">${esc(m.location)}${m.precise ? "" : " (approximate)"}${m.topics.length ? " · " + esc(m.topics.join(", ")) : ""}</p>` +
       `<strong>${esc(m.headline)}</strong><p>${esc(m.summary)}</p>`,
       { maxWidth: 320 }
-    ));
+    );
+    cluster.addLayer(marker);
+    if (m.story_id === focusStory) focusMarker = marker;
   });
   map.addLayer(cluster);
-  if (bounds.length) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 6 });
+  // Arriving from a story's pin icon on /stories: zoom to it and open its popup.
+  if (focusMarker) {
+    cluster.zoomToShowLayer(focusMarker, () => focusMarker.openPopup());
+  }
+  if (bounds.length && !focusMarker) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 6 });
 </script>
 </body>
 </html>
