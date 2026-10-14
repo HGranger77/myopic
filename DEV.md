@@ -91,6 +91,11 @@ every incidental mention - see `nlp/matching.py`'s `filter_significant_entities(
 story-level equivalent (NER over every source's combined text) existed earlier but was removed -
 it was never read by anything.
 
+`geolocate-story` runs after `article-entities` (it reads that stage's location entities) and is also
+scoped to relevant stories. It has no model - just throttled (1 req/s) Nominatim calls, with every
+lookup cached in `geocode_cache`, so it needs outbound internet from the cluster. A network failure
+leaves the story on the worklist for the next run; "no place found" is recorded so it isn't retried.
+
 `translate-article` sits right after `fetch-article-bodies`: translation is autoregressive
 (the same cost class as the disconnected LLM path, not `tag-relevance`'s one-shot classifier),
 so it's bounded to a prefix of each article rather than the full body - see `nlp/translate.py`.

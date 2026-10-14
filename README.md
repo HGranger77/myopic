@@ -53,24 +53,27 @@ flowchart TD
     TR["tag-relevance<br/><b>bart-large-mnli</b><br/><i>zero-shot vs. the watchlist</i>"]
     SA["sentiment-article<br/><b>distilbert-sst-2</b><br/><i>relevant stories only</i>"]
     ART["article-entities<br/><b>spaCy en_core_web_sm</b><br/><i>relevant stories only</i>"]
+    GS["geolocate-story<br/><b>Nominatim geocoder</b><br/><i>relevant stories only, no model</i>"]
     FIN[finalize]
 
     SR --> D1 & D2 & D3 & D4 & D5
     D1 & D2 & D3 & D4 & D5 --> FAB
     FAB --> TA --> EA --> CS --> SS --> TR
     TR --> SA --> FIN
-    TR --> ART --> FIN
+    TR --> ART --> GS --> FIN
 ```
 
 `discover` runs as one task per configured source, in parallel, each writing straight into the
 shared `fetch-article-bodies` worklist. Every other labeled node names the actual model it loads;
 `cluster-stories` has none of its own - it just does cosine-similarity matching over the vectors
-`embed-article` already produced.
+`embed-article` already produced - and `geolocate-story` calls an external geocoder instead of
+loading one. It runs after `article-entities` because it ranks each story's places from that stage's
+location entities.
 
 Relevance is decided **after** clustering and summarizing, not before: every fetched article
 gets embedded and clustered regardless of watchlist relevance, and every story gets a summary.
 Only then does `tag-relevance` check that short summary against the watchlist, and the two
-downstream stages - sentiment and per-article entities - scope themselves back down to just the
+downstream stages - sentiment, per-article entities, and geolocation - scope themselves back down to just the
 stories that matched, since there's no reason to spend a CPU-bound model pass on a story nobody's
 watching for. See [DEV.md](DEV.md) for the full rationale and how to run and deploy this
 yourself.
@@ -84,13 +87,15 @@ summary, and then every source that covered it - with that source's own sentimen
 the people, organizations, and locations its own NER pass found. Stories can be filtered by
 topic, with a live count of how many stories currently match each one.
 
+## The story map
+
+`/map` shows a day's stories as icons at the place each one happened (`/map?date=YYYY-MM-DD`).
+`geolocate-story` picks each relevant story's most-mentioned place from its articles' GPE/LOC
+entities and geocodes it via Nominatim (cached in `geocode_cache`; override the endpoint with
+`MYOPIC_GEOCODER_URL`). A specific place (a city) beats a vague one (a country) when a story
+mentions both; stories that only name a country, region, or continent are drawn as a faded icon
+with a dashed circle for the approximate area. Stories with no resolvable place don't appear.
+
 ## Documentation
 
 See [DEV.md](DEV.md) for local development, Docker, Kubernetes deployment, and monitoring setup.
-
-### Map view
-
-`geolocate-story` (after `article-entities`) picks each relevant story's most-mentioned place from
-its articles' GPE/LOC entities and geocodes it via Nominatim (cached in `geocode_cache`; override
-the endpoint with `MYOPIC_GEOCODER_URL`). `/map` shows a day's located stories as icons on a
-Leaflet map (`/map?date=YYYY-MM-DD`).
