@@ -410,9 +410,8 @@ def test_pick_location_prefers_precise_over_vague_and_skips_non_places(monkeypat
         return None if rank is None else {"lat": 1.0, "lon": 2.0, "display_name": p, "place_rank": rank, "radius_km": radius}
 
     monkeypatch.setattr(nlp.geocode, "geocode", fake)
-    # "Kangaroos" is on the stoplist, so it must never reach the geocoder
+    # a result the geocoder rejects as a non-place (None) is skipped
     assert run_batch._pick_location(["Kangaroos", "Australia", "Sydney"]) == ("Sydney", 1.0, 2.0, True, None)
-    assert "Kangaroos" not in calls
     # only a vague place available -> approximate, with its radius
     assert run_batch._pick_location(["Australia"]) == ("Australia", 1.0, 2.0, False, 2000)
     assert run_batch._pick_location(["n't"]) is None

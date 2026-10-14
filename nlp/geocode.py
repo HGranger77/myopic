@@ -28,23 +28,14 @@ MAX_PLACE_RANK = 19
 # pin; below it (country/state/continent) the map shows an approximate area.
 PRECISE_MIN_RANK = 12
 
-# NER mislabels team nicknames/brands as GPE; some of those also happen to be
-# real town names (Westfield, NJ), which no geocoder filter can catch.
-STOPLIST = {
-    "kangaroos", "wallabies", "matildas", "socceroos", "tillies", "proteas", "sporting",
-    "westfield", "blues", "maroons", "swans", "dogs", "eagles", "tigers", "lions", "magpies",
-    "bulldogs", "storm", "roosters", "raiders", "broncos", "knights", "titans", "sharks",
-}
-
 
 def plausible_place(name: str) -> bool:
-    """Cheap pre-geocode screen: real-looking text and not a known non-place."""
+    """Cheap pre-geocode screen: drops NER fragments that aren't words (\"n't\", \"'s\")."""
     name = name.strip()
     return (
         len(name) >= 3
         and re.search(r"[A-Za-z]{3}", name) is not None
         and not name.startswith(("'", "\u2019"))
-        and name.lower() not in STOPLIST
     )
 
 
