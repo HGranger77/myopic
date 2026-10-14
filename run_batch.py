@@ -413,9 +413,7 @@ def check_claims(run_id: int) -> int:
 
     for story_id in sorted(story_ids):
         claims = ops.get_story_claims(story_id)
-        groups = group_claims(
-            [{**c, "embedding": list(c["embedding"])} for c in claims], CLAIM_MAX_DISTANCE
-        )
+        groups = group_claims(claims, CLAIM_MAX_DISTANCE)
         ops.replace_story_claim_groups(story_id, groups)
         corroborated = sum(g["status"] == "corroborated" for g in groups)
         print(f"[check-claims] story {story_id}: {len(groups)} claim groups, {corroborated} corroborated")

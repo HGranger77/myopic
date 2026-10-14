@@ -63,6 +63,9 @@ def test_claims_worklist_checked_once_and_groups_roundtrip():
     ops.insert_claims(a1, [{"sentence": "Twelve people died in the crash.", "embedding": vec}])  # retry: no dupes
     claims = ops.get_story_claims(story_id)
     assert len(claims) == 1
+    # Regression: pgvector returns a Vector/ndarray depending on version, and
+    # group_claims needs a plain list - this once crashed check-claims.
+    assert isinstance(claims[0]["embedding"], list) and len(claims[0]["embedding"]) == 384
 
     ops.replace_story_claim_groups(
         story_id, [{"claim_ids": [claims[0]["id"]], "source_count": 1, "status": "single_source"}]

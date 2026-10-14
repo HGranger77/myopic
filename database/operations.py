@@ -952,7 +952,9 @@ def insert_claims(article_id: int, claims: Iterable[dict]) -> None:
 
 def get_story_claims(story_id: int) -> list[dict]:
     """Every claim from a story's member articles, with its source and
-    embedding (a numpy array, via pgvector) - group_claims' input."""
+    embedding as a plain list[float] - group_claims' input. pgvector hands
+    back a Vector object or a numpy array depending on its version (the
+    requirements only pin >=0.3), so normalize here rather than at callers."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -966,7 +968,11 @@ def get_story_claims(story_id: int) -> list[dict]:
                 """,
                 (story_id,),
             )
-            return [dict(row) for row in cur.fetchall()]
+            rows = [dict(row) for row in cur.fetchall()]
+    for row in rows:
+        emb = row["embedding"]
+        row["embedding"] = emb.to_list() if hasattr(emb, "to_list") else [float(x) for x in emb]
+    return rows
 
 
 def replace_story_claim_groups(story_id: int, groups: Iterable[dict]) -> None:
