@@ -173,8 +173,12 @@ CREATE TABLE IF NOT EXISTS geocode_cache (
     lat           DOUBLE PRECISION,
     lon           DOUBLE PRECISION,
     display_name  TEXT,
+    place_rank    INTEGER,
+    radius_km     DOUBLE PRECISION,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE geocode_cache ADD COLUMN IF NOT EXISTS place_rank INTEGER;
+ALTER TABLE geocode_cache ADD COLUMN IF NOT EXISTS radius_km DOUBLE PRECISION;
 
 -- Where a story took place - one row per story, stamped by the
 -- geolocate-story stage even when no location could be found (lat/lon
@@ -186,5 +190,11 @@ CREATE TABLE IF NOT EXISTS story_locations (
     location_text  TEXT,
     lat            DOUBLE PRECISION,
     lon            DOUBLE PRECISION,
+    -- precise: a specific settlement; otherwise the map shows an approximate
+    -- area of radius_km (a country, state or continent)
+    precise        BOOLEAN,
+    radius_km      DOUBLE PRECISION,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE story_locations ADD COLUMN IF NOT EXISTS precise BOOLEAN;
+ALTER TABLE story_locations ADD COLUMN IF NOT EXISTS radius_km DOUBLE PRECISION;

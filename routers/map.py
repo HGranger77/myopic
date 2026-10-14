@@ -24,6 +24,8 @@ def map_page(request: Request, date: Optional[str] = None):
             "lat": s["lat"],
             "lon": s["lon"],
             "location": s["location_text"],
+            "precise": bool(s["precise"]),
+            "radius_km": s["radius_km"],
             "headline": s["headline"],
             "summary": s["summary_text"],
             "topics": s["topics"],

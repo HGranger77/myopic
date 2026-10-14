@@ -961,7 +961,7 @@ def get_cached_geocode(query: str) -> Optional[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT lat, lon, display_name FROM geocode_cache WHERE query = %s", (query.lower(),)
+                "SELECT lat, lon, display_name, place_rank, radius_km FROM geocode_cache WHERE query = %s", (query.lower(),)
             )
             row = cur.fetchone()
             return dict(row) if row else None
@@ -973,26 +973,32 @@ def set_cached_geocode(query: str, result: Optional[dict]) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO geocode_cache (query, lat, lon, display_name) VALUES (%s, %s, %s, %s)
+                INSERT INTO geocode_cache (query, lat, lon, display_name, place_rank, radius_km)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (query) DO UPDATE
-                SET lat = EXCLUDED.lat, lon = EXCLUDED.lon, display_name = EXCLUDED.display_name
+                SET lat = EXCLUDED.lat, lon = EXCLUDED.lon, display_name = EXCLUDED.display_name,
+                    place_rank = EXCLUDED.place_rank, radius_km = EXCLUDED.radius_km
                 """,
-                (query.lower(), result.get("lat"), result.get("lon"), result.get("display_name")),
+                (query.lower(), result.get("lat"), result.get("lon"), result.get("display_name"),
+                 result.get("place_rank"), result.get("radius_km")),
             )
 
 
 def upsert_story_location(
-    story_id: int, location_text: Optional[str], lat: Optional[float], lon: Optional[float]
+    story_id: int, location_text: Optional[str], lat: Optional[float], lon: Optional[float],
+    precise: Optional[bool] = None, radius_km: Optional[float] = None,
 ) -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO story_locations (story_id, location_text, lat, lon) VALUES (%s, %s, %s, %s)
+                INSERT INTO story_locations (story_id, location_text, lat, lon, precise, radius_km)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (story_id) DO UPDATE
-                SET location_text = EXCLUDED.location_text, lat = EXCLUDED.lat, lon = EXCLUDED.lon
+                SET location_text = EXCLUDED.location_text, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                    precise = EXCLUDED.precise, radius_km = EXCLUDED.radius_km
                 """,
-                (story_id, location_text, lat, lon),
+                (story_id, location_text, lat, lon, precise, radius_km),
             )
 
 
@@ -1006,7 +1012,7 @@ def get_map_stories(date: Optional[str] = None) -> list[dict]:
             cur.execute(
                 """
                 SELECT s.id AS story_id, s.updated_at, ss.summary_text,
-                       sl.location_text, sl.lat, sl.lon,
+                       sl.location_text, sl.lat, sl.lon, sl.precise, sl.radius_km,
                        (SELECT a.headline FROM story_articles sa
                         JOIN articles a ON a.id = sa.article_id
                         WHERE sa.story_id = s.id ORDER BY a.discovered_at LIMIT 1) AS headline,

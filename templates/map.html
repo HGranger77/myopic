@@ -26,6 +26,8 @@
   #map { height: 65vh; min-height: 360px; border: 1px solid var(--border); border-radius: 8px; }
   .popup-loc { color: #6b6b6b; font-size: .85em; margin: 0 0 .25rem; }
   .story-pin { filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .story-pin.approx { opacity: .55; }
+  .legend { color: var(--muted); font-size: .85rem; margin-top: .75rem; }
   .empty { color: var(--muted); margin-top: 1rem; }
 </style>
 </head>
@@ -41,6 +43,7 @@
     <span class="sub" style="margin:0">{{ story_count }} located stor{{ 'y' if story_count == 1 else 'ies' }}</span>
   </div>
   <div id="map"></div>
+  <p class="legend">Solid icons mark a specific place. Faded icons with a dashed circle are approximate &mdash; the story only names a country, region or continent.</p>
   {% if not markers %}<p class="empty">No located stories for this day.</p>{% endif %}
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -56,6 +59,8 @@
   const PIN_SVG = '<svg width="26" height="26" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" fill="#2f5fd6" stroke="#fff" stroke-width="1.5"/><path d="M7 9h10M7 12h10M7 15h6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>';
   const icon = L.divIcon({ className: "story-pin", html: PIN_SVG, iconSize: [26, 26], iconAnchor: [13, 13], popupAnchor: [0, -12] });
 
+  const approxIcon = L.divIcon({ className: "story-pin approx", html: PIN_SVG, iconSize: [26, 26], iconAnchor: [13, 13], popupAnchor: [0, -12] });
+
   // Stories in the same place share coordinates - fan them out slightly so
   // every icon stays visible and clickable.
   const seen = {};
@@ -66,8 +71,13 @@
     const angle = n * 2.4, r = n ? 0.03 * Math.sqrt(n) : 0;
     const pos = [m.lat + r * Math.sin(angle), m.lon + r * Math.cos(angle)];
     bounds.push(pos);
-    L.marker(pos, { icon, title: m.headline || "" }).addTo(map).bindPopup(
-      `<p class="popup-loc">${esc(m.location)}${m.topics.length ? " · " + esc(m.topics.join(", ")) : ""}</p>` +
+    if (!m.precise) {
+      // Vague place (country/state/continent): faded pin + dashed circle for the approximate area.
+      L.circle([m.lat, m.lon], { radius: Math.min(m.radius_km || 200, 1500) * 1000, color: "#2f5fd6",
+        weight: 1, dashArray: "5 5", fillOpacity: 0.06, interactive: false }).addTo(map);
+    }
+    L.marker(pos, { icon: m.precise ? icon : approxIcon, title: m.headline || "" }).addTo(map).bindPopup(
+      `<p class="popup-loc">${esc(m.location)}${m.precise ? "" : " (approximate)"}${m.topics.length ? " · " + esc(m.topics.join(", ")) : ""}</p>` +
       `<strong>${esc(m.headline)}</strong><p>${esc(m.summary)}</p>`,
       { maxWidth: 320 }
     );

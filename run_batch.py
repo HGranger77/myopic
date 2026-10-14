@@ -380,37 +380,53 @@ def article_entities(run_id: int) -> int:
 #
 # A story's location is its most-mentioned significant place (GPE/LOC)
 # across member articles' NER output, so this runs after article-entities.
-# Candidates are tried in rank order until one geocodes. Always writes a
+# See _pick_location() for how the place is chosen. Always writes a
 # story_locations row (lat/lon NULL if nothing resolved) so the story isn't
 # retried every run. A network failure is NOT recorded - the story stays on
 # the worklist for the next run.
 # ---------------------------------------------------------------------------
 
-MAX_GEOCODE_CANDIDATES = 3
+MAX_GEOCODE_CANDIDATES = 5
+
+
+def _pick_location(candidates: list[str]):
+    """candidates: place names, most-mentioned first. Geocodes the top few
+    (cached) and prefers the most-mentioned PRECISE place (a specific
+    settlement) over a vague one (country/state/continent) even if the vague
+    one is mentioned more - "Sydney" beats "Australia". Falls back to the
+    most-mentioned vague place, or None if nothing geocodes to a real place."""
+    from nlp.geocode import PRECISE_MIN_RANK, geocode, plausible_place
+
+    vague = None
+    for place in [c for c in candidates if plausible_place(c)][:MAX_GEOCODE_CANDIDATES]:
+        place_key = place.removeprefix("the ").removeprefix("The ")
+        hit = ops.get_cached_geocode(place_key)
+        if hit is None:
+            hit = geocode(place_key)
+            ops.set_cached_geocode(place_key, hit)
+            hit = hit or {}
+        if hit.get("lat") is None:
+            continue
+        precise = hit["place_rank"] >= PRECISE_MIN_RANK
+        found = (place, hit["lat"], hit["lon"], precise, None if precise else hit["radius_km"])
+        if precise:
+            return found
+        vague = vague or found
+    return vague
 
 
 def geolocate_story(run_id: int) -> int:
     # run_id unused - gap-based worklist, see sentiment_article()'s comment.
-    from nlp.geocode import geocode
-
     todo = ops.get_relevant_stories_missing_location()
     located = 0
     for i, story_id in enumerate(todo, start=1):
         try:
-            found = None
-            for place in ops.get_story_location_candidates(story_id)[:MAX_GEOCODE_CANDIDATES]:
-                cached = ops.get_cached_geocode(place)
-                if cached is None:
-                    result = geocode(place)
-                    ops.set_cached_geocode(place, result)
-                    cached = result or {}
-                if cached.get("lat") is not None:
-                    found = (place, cached["lat"], cached["lon"])
-                    break
+            found = _pick_location(ops.get_story_location_candidates(story_id))
             if found:
                 ops.upsert_story_location(story_id, *found)
                 located += 1
-                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: {found[0]}")
+                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: {found[0]}"
+                      f"{'' if found[3] else ' (approximate)'}")
             else:
                 ops.upsert_story_location(story_id, None, None, None)
                 print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: no location found")
