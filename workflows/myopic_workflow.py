@@ -233,8 +233,13 @@ with CronWorkflow(
         inputs=[Parameter(name="run-id")],
         env=ENV,
         env_from=ENV_FROM,
-        # No model - just throttled (1 req/s) geocoder HTTP calls, cached in Postgres.
-        resources=Resources(cpu_request="100m", cpu_limit="300m", memory_request="128Mi", memory_limit="256Mi"),
+        # Loads facebook/bart-large-mnli (the same model, same ~1.7GB peak, as
+        # tag-relevance - see nlp/placeselect.py) plus throttled geocoder HTTP
+        # calls. cpu_limit=4 must match nlp/tagging.py's _N_THREADS, which it
+        # shares. Depends on entity-sentiment, not just article-entities, so
+        # it never overlaps with that stage's own model: together with the
+        # (small) sentiment-article it stays well under the 6GB node.
+        resources=Resources(cpu_request="2", cpu_limit="4", memory_request="2Gi", memory_limit="3Gi"),
     )
 
     entity_sentiment = Container(
@@ -296,12 +301,12 @@ with CronWorkflow(
         ae = article_entities(name="article-entities", arguments=_run_id_arg(), dependencies=["tag-relevance"])
         es = entity_sentiment(name="entity-sentiment", arguments=_run_id_arg(), dependencies=["article-entities"])
 
-        gs = geolocate_story(name="geolocate-story", arguments=_run_id_arg(), dependencies=["article-entities"])
+        gs = geolocate_story(name="geolocate-story", arguments=_run_id_arg(), dependencies=["entity-sentiment"])
 
         fin = finalize(
             name="finalize",
             arguments=_run_id_arg(),
-            dependencies=["sentiment-article", "entity-sentiment", "geolocate-story"],
+            dependencies=["sentiment-article", "geolocate-story"],
         )
 
 

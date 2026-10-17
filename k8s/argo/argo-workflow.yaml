@@ -323,11 +323,11 @@ spec:
             name: postgres-secret
         resources:
           limits:
-            cpu: 300m
-            memory: 256Mi
+            cpu: '4'
+            memory: 3Gi
           requests:
-            cpu: 100m
-            memory: 128Mi
+            cpu: '2'
+            memory: 2Gi
       inputs:
         parameters:
         - name: run-id
@@ -473,7 +473,7 @@ spec:
         - name: geolocate-story
           template: geolocate-story
           dependencies:
-          - article-entities
+          - entity-sentiment
           arguments:
             parameters:
             - name: run-id
@@ -482,7 +482,6 @@ spec:
           template: finalize
           dependencies:
           - sentiment-article
-          - entity-sentiment
           - geolocate-story
           arguments:
             parameters:

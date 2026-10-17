@@ -432,52 +432,6 @@ def test_map_page_excludes_story_without_coordinates():
     assert "No located stories" in resp.text
 
 
-def test_story_location_candidates_ranked_by_article_count():
-    story_id, article_id = _seed_matched_story()
-    ops.insert_article_entities(article_id, [
-        {"text": "Washington", "normalized_text": "washington", "label": "GPE", "start_char": 0, "end_char": 10},
-    ])
-    assert ops.get_story_location_candidates(story_id) == ["Washington"]
-
-
-def test_geolocate_story_stage_uses_cache_and_stamps_story(monkeypatch):
-    import nlp.geocode
-    import run_batch
-
-    story_id, article_id = _seed_matched_story()
-    ops.insert_article_entities(article_id, [
-        {"text": "Washington", "normalized_text": "washington", "label": "GPE", "start_char": 0, "end_char": 10},
-    ])
-    ops.set_article_relevance(article_id, True)
-    calls = []
-    monkeypatch.setattr(nlp.geocode, "geocode", lambda p: calls.append(p) or {"lat": 1.5, "lon": 2.5, "display_name": p, "place_rank": 16, "radius_km": 5})
-    assert run_batch.geolocate_story(1) == 0
-    assert calls == ["Washington"]
-    assert ops.get_cached_geocode("washington")["lat"] == 1.5
-    assert [m["location_text"] for m in ops.get_map_stories()] == ["Washington"]
-    assert ops.get_relevant_stories_missing_location() == []
-
-
-def test_pick_location_prefers_precise_over_vague_and_skips_non_places(monkeypatch):
-    import nlp.geocode
-    import run_batch
-
-    ranks = {"Australia": (4, 2000), "Sydney": (16, 30), "Kangaroos": (None, None)}
-    calls = []
-
-    def fake(p):
-        calls.append(p)
-        rank, radius = ranks[p]
-        return None if rank is None else {"lat": 1.0, "lon": 2.0, "display_name": p, "place_rank": rank, "radius_km": radius}
-
-    monkeypatch.setattr(nlp.geocode, "geocode", fake)
-    # a result the geocoder rejects as a non-place (None) is skipped
-    assert run_batch._pick_location(["Kangaroos", "Australia", "Sydney"]) == ("Sydney", 1.0, 2.0, True, None)
-    # only a vague place available -> approximate, with its radius
-    assert run_batch._pick_location(["Australia"]) == ("Australia", 1.0, 2.0, False, 2000)
-    assert run_batch._pick_location(["n't"]) is None
-
-
 def test_stories_page_links_located_story_to_map_and_has_tabs():
     story_id, _ = _seed_matched_story()
     unlocated_id, _ = _seed_matched_story(entity_name="Other", url="https://www.nine.com.au/x.html")

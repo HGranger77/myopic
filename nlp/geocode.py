@@ -24,10 +24,6 @@ _last_request = 0.0
 # what a mislabelled non-place ("Kangaroos", "Sporting") resolves to, so
 # anything at 20+ is rejected rather than pinned.
 MAX_PLACE_RANK = 19
-# At or above this the result is a specific settlement, shown as a precise
-# pin; below it (country/state/continent) the map shows an approximate area.
-PRECISE_MIN_RANK = 12
-
 
 def plausible_place(name: str) -> bool:
     """Cheap pre-geocode screen: drops NER fragments that aren't words (\"n't\", \"'s\")."""

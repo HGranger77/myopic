@@ -382,61 +382,90 @@ def article_entities(run_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# geolocate-story (one task, geocoder HTTP calls, loop over relevant stories
-# still missing a location)
+# geolocate-story (one task, one ML model + a geocoder, loop over relevant
+# stories still missing a location)
 #
-# A story's location is its most-mentioned significant place (GPE/LOC)
-# across member articles' NER output, so this runs after article-entities.
-# See _pick_location() for how the place is chosen. Always writes a
-# story_locations row (lat/lon NULL if nothing resolved) so the story isn't
-# retried every run. A network failure is NOT recorded - the story stays on
-# the worklist for the next run.
+# Decides where each relevant story happened. Five steps per story, only
+# ONE of which is a model (full rationale in nlp/placeselect.py):
+#
+#   1. candidates   NER places from article-entities          (database read)
+#   2. name screen  drop places that are really person names  (counting)
+#   3. geocode      OpenStreetMap Nominatim, cached           (HTTP, no ML)
+#   4. NLI scoring  facebook/bart-large-mnli                  (ML)
+#   5. choice       best score -> more specific child -> min-confidence cutoff
+#
+# Runs after article-entities (needs its places). Always writes a
+# story_locations row (lat/lon NULL if no place cleared the cutoff) so the
+# story isn't retried every run. A network failure is NOT recorded - the
+# story stays on the worklist for the next run.
 # ---------------------------------------------------------------------------
 
-MAX_GEOCODE_CANDIDATES = 5
+def _story_premise(story_id: int) -> str:
+    articles = ops.get_story_articles(story_id)
+    return f"{articles[0]['headline']}. {ops.get_story_summary_text(story_id) or ''}"
 
 
-def _pick_location(candidates: list[str]):
-    """candidates: place names, most-mentioned first. Geocodes the top few
-    (cached) and prefers the most-mentioned PRECISE place (a specific
-    settlement) over a vague one (country/state/continent) even if the vague
-    one is mentioned more - "Sydney" beats "Australia". Falls back to the
-    most-mentioned vague place, or None if nothing geocodes to a real place."""
-    from nlp.geocode import PRECISE_MIN_RANK, geocode, plausible_place
+def _locate(story_id: int):
+    """Runs the five steps. Returns (candidate, nli_score, runners_up) or
+    None; runners_up is [(place, nli_score), ...] for the log."""
+    from nlp import placeselect
+    from nlp.geocode import geocode, plausible_place
 
-    vague = None
-    for place in [c for c in candidates if plausible_place(c)][:MAX_GEOCODE_CANDIDATES]:
-        place_key = place.removeprefix("the ").removeprefix("The ")
-        hit = ops.get_cached_geocode(place_key)
-        if hit is None:
-            hit = geocode(place_key)
-            ops.set_cached_geocode(place_key, hit)
-            hit = hit or {}
-        if hit.get("lat") is None:
-            continue
-        precise = hit["place_rank"] >= PRECISE_MIN_RANK
-        found = (place, hit["lat"], hit["lon"], precise, None if precise else hit["radius_km"])
-        if precise:
-            return found
-        vague = vague or found
-    return vague
+    # 1. candidates (NER, from article-entities) + 2. name screen
+    candidates = placeselect.screen_candidates(
+        [c for c in ops.get_story_place_candidates(story_id) if plausible_place(c["text"])]
+    )
+
+    # 3. geocode - keep only candidates that resolve to a real place
+    located = []
+    for c in candidates:
+        geo = ops.get_cached_geocode(c["key"])
+        if geo is None:
+            geo = geocode(c["key"])
+            ops.set_cached_geocode(c["key"], geo)
+            geo = geo or {}
+        if geo.get("lat") is not None:
+            located.append({**c, "geo": geo})
+        if len(located) == placeselect.MAX_CANDIDATES:
+            break
+    if not located:
+        return None
+
+    # 4. NLI scoring - the only model call
+    scores = placeselect.nli_scores(_story_premise(story_id), [c["text"] for c in located])
+
+    # 5. choice
+    chosen = placeselect.choose_place(located, scores)
+    if chosen is None:
+        return None
+    runners_up = sorted(((t, s) for t, s in scores.items() if t != chosen[0]["text"]), key=lambda x: -x[1])[:2]
+    return chosen[0], chosen[1], runners_up
 
 
 def geolocate_story(run_id: int) -> int:
     # run_id unused - gap-based worklist, see sentiment_article()'s comment.
+    from nlp.placeselect import PRECISE_MIN_RANK
+
     todo = ops.get_relevant_stories_missing_location()
     located = 0
     for i, story_id in enumerate(todo, start=1):
         try:
-            found = _pick_location(ops.get_story_location_candidates(story_id))
-            if found:
-                ops.upsert_story_location(story_id, *found)
-                located += 1
-                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: {found[0]}"
-                      f"{'' if found[3] else ' (approximate)'}")
-            else:
+            found = _locate(story_id)
+            if found is None:
                 ops.upsert_story_location(story_id, None, None, None)
-                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: no location found")
+                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: no place cleared the cutoff")
+                continue
+            place, score, runners_up = found
+            geo = place["geo"]
+            precise = geo["place_rank"] >= PRECISE_MIN_RANK
+            ops.upsert_story_location(
+                story_id, place["text"], geo["lat"], geo["lon"], precise,
+                None if precise else geo["radius_km"], score,
+            )
+            located += 1
+            others = ", ".join(f"{t} {s:.2f}" for t, s in runners_up)
+            print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: {place['text']} "
+                  f"(nli {score:.2f}{'' if precise else ', approximate'}; next: {others})")
         except Exception as exc:  # noqa: BLE001
             print(f"[geolocate-story] {i}/{len(todo)} failed for story {story_id}: {exc}", file=sys.stderr)
 

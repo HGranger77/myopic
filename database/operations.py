@@ -1039,23 +1039,59 @@ def get_relevant_stories_missing_location() -> list[int]:
             return [row["story_id"] for row in cur.fetchall()]
 
 
-def get_story_location_candidates(story_id: int) -> list[str]:
-    """Place names for a story, best guess first: the significant GPE/LOC
-    entities of each member article (see get_article_entities), ranked by how
-    many of the story's articles mention them. Exact case-insensitive
-    matching, like the /stories page's common-entities logic."""
-    counts: dict[str, int] = {}
-    display: dict[str, str] = {}
-    order: list[str] = []
-    for article in get_story_articles(story_id):
-        for place in get_article_entities(article["id"])["locations"]:
-            key = place.lower()
-            if key not in counts:
-                display[key] = place
-                order.append(key)
-            counts[key] = counts.get(key, 0) + 1
-    order.sort(key=lambda k: -counts[k])  # stable: ties keep first-seen order
-    return [display[k] for k in order]
+def get_story_place_candidates(story_id: int) -> list[dict]:
+    """Every place (GPE/LOC/FAC) NER found in a story's articles, with the
+    counts nlp.placeselect needs. No model runs here. Returns
+    [{text, key, significant_articles, mentions, person_mentions,
+    headline_hits}, ...] ordered by significance + headline hits, strongest
+    first.
+
+    significant_articles: how many member articles pass
+    nlp.matching.filter_significant_entities for this place (see
+    get_article_entities). person_mentions: how many PERSON/ORG entities in
+    the story contain this place's text as a word - only for one-word names
+    ("Kabila" in "Joseph Kabila"), 0 otherwise."""
+    import re
+
+    from nlp.placeselect import place_key
+
+    articles = get_story_articles(story_id)
+    ids = [a["id"] for a in articles]
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT entity_text, entity_label FROM article_entities WHERE article_id = ANY(%s)",
+                (ids,),
+            )
+            rows = cur.fetchall()
+    places: dict[str, dict] = {}
+    name_words: dict[str, int] = {}
+    for row in rows:
+        text, label = row["entity_text"], row["entity_label"]
+        if label in ("GPE", "LOC", "FAC"):
+            p = places.setdefault(place_key(text), {"text": text, "mentions": 0, "significant_articles": 0})
+            p["mentions"] += 1
+        if label in ("PERSON", "ORG"):
+            for word in re.findall(r"[a-z]{3,}", text.lower()):
+                name_words[word] = name_words.get(word, 0) + 1
+    for article in articles:
+        for text in get_article_entities(article["id"])["locations"]:
+            p = places.setdefault(place_key(text), {"text": text, "mentions": 0, "significant_articles": 0})
+            p["significant_articles"] += 1
+    headlines = " ".join(a["headline"] for a in articles).lower()
+    out = []
+    for key, p in places.items():
+        words = re.findall(r"[a-z]{3,}", key)
+        out.append({
+            "key": key, "text": p["text"],
+            "significant_articles": p["significant_articles"], "mentions": p["mentions"],
+            "person_mentions": name_words.get(words[0], 0) if len(words) == 1 else 0,
+            "headline_hits": len(re.findall(r"(?<![a-z])" + re.escape(key) + r"(?![a-z])", headlines)),
+        })
+    # only places the pipeline's own significance filter or the headline vouches for
+    out = [c for c in out if c["significant_articles"] > 0 or c["headline_hits"] > 0]
+    out.sort(key=lambda c: -(c["significant_articles"] + c["headline_hits"]))
+    return out
 
 
 def get_cached_geocode(query: str) -> Optional[dict]:
@@ -1090,18 +1126,20 @@ def set_cached_geocode(query: str, result: Optional[dict]) -> None:
 def upsert_story_location(
     story_id: int, location_text: Optional[str], lat: Optional[float], lon: Optional[float],
     precise: Optional[bool] = None, radius_km: Optional[float] = None,
+    confidence: Optional[float] = None,
 ) -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO story_locations (story_id, location_text, lat, lon, precise, radius_km)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO story_locations (story_id, location_text, lat, lon, precise, radius_km, confidence)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (story_id) DO UPDATE
                 SET location_text = EXCLUDED.location_text, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
-                    precise = EXCLUDED.precise, radius_km = EXCLUDED.radius_km
+                    precise = EXCLUDED.precise, radius_km = EXCLUDED.radius_km,
+                    confidence = EXCLUDED.confidence
                 """,
-                (story_id, location_text, lat, lon, precise, radius_km),
+                (story_id, location_text, lat, lon, precise, radius_km, confidence),
             )
 
 

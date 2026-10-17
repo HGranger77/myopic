@@ -233,7 +233,10 @@ CREATE TABLE IF NOT EXISTS story_locations (
     -- area of radius_km (a country, state or continent)
     precise        BOOLEAN,
     radius_km      DOUBLE PRECISION,
+    -- the NLI model's score that the story happened here (nlp/placeselect.py)
+    confidence     REAL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE story_locations ADD COLUMN IF NOT EXISTS confidence REAL;
 ALTER TABLE story_locations ADD COLUMN IF NOT EXISTS precise BOOLEAN;
 ALTER TABLE story_locations ADD COLUMN IF NOT EXISTS radius_km DOUBLE PRECISION;
