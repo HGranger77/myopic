@@ -32,9 +32,15 @@ def _get_classifier():
     return _classifier
 
 
-def analyze(text: str, entity: str) -> tuple[str, float]:
-    """Returns (label, score) - label is one of Positive, Negative, Neutral,
-    scoped to how `text` frames `entity` specifically, not the text overall.
+_BATCH_SIZE = 8
+
+
+def analyze_batch(text: str, entities: list[str]) -> list[tuple[str, float]]:
+    """Scores every entity against the same `text` in one pipeline call
+    (batched forward passes, one per _BATCH_SIZE entities) instead of one
+    call per entity - the per-call overhead (tokenizer setup, padding,
+    dispatch) dominated when an article has dozens of entities. Returns
+    (label, score) per entity, in input order.
 
     truncation/max_length must be passed directly to the pipeline call, not
     pre-applied via a separate tokenizer.encode/decode pass the way
@@ -45,6 +51,15 @@ def analyze(text: str, entity: str) -> tuple[str, float]:
     silently a no-op here - the tokenizer warns "model has no predefined
     maximum length" and returns the FULL untruncated input - so max_length
     must be given explicitly, every call."""
+    if not entities:
+        return []
     classifier = _get_classifier()
-    result = classifier(text, text_pair=entity, truncation=True, max_length=_MAX_INPUT_TOKENS)[0]
-    return result["label"], result["score"]
+    inputs = [{"text": text, "text_pair": entity} for entity in entities]
+    results = classifier(inputs, truncation=True, max_length=_MAX_INPUT_TOKENS,
+                         batch_size=_BATCH_SIZE)
+    return [(r["label"], r["score"]) for r in results]
+
+
+def analyze(text: str, entity: str) -> tuple[str, float]:
+    """Single-entity convenience wrapper over analyze_batch()."""
+    return analyze_batch(text, [entity])[0]

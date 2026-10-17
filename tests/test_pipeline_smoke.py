@@ -73,8 +73,8 @@ def _fake_analyze_emotion(text):
     return "joy", 0.87
 
 
-def _fake_analyze_entity_sentiment(text, entity):
-    return "Positive", 0.93
+def _fake_analyze_entity_sentiment_batch(text, entities):
+    return [("Positive", 0.93) for _ in entities]
 
 
 def _patch_models(monkeypatch):
@@ -91,7 +91,7 @@ def _patch_models(monkeypatch):
     monkeypatch.setattr(summarize_module, "summarize", _fake_summarize)
     monkeypatch.setattr(sentiment_module, "analyze", _fake_analyze_sentiment)
     monkeypatch.setattr(emotion_module, "analyze", _fake_analyze_emotion)
-    monkeypatch.setattr(entity_sentiment_module, "analyze", _fake_analyze_entity_sentiment)
+    monkeypatch.setattr(entity_sentiment_module, "analyze_batch", _fake_analyze_entity_sentiment_batch)
 
 
 def test_pipeline_end_to_end(monkeypatch, tmp_path):

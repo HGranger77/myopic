@@ -399,7 +399,7 @@ def article_entities(run_id: int) -> int:
 def entity_sentiment(run_id: int) -> int:
     # run_id unused - see sentiment_article()'s comment above for why.
     from nlp.entity_sentiment import MODEL_NAME as ENTITY_SENTIMENT_MODEL_NAME
-    from nlp.entity_sentiment import analyze as analyze_entity_sentiment
+    from nlp.entity_sentiment import analyze_batch as analyze_entity_sentiment_batch
 
     todo = ops.get_relevant_articles_missing_entity_sentiment()
     done = 0
@@ -407,16 +407,17 @@ def entity_sentiment(run_id: int) -> int:
         try:
             article = ops.get_article(row["article_id"])
             entities = ops.get_article_entities(article["id"])
-            scored = []
-            for category, texts in entities.items():
-                for entity_text in texts:
-                    label, score = analyze_entity_sentiment(article["body_text"], entity_text)
-                    scored.append({
-                        "entity_text": entity_text,
-                        "entity_category": category,
-                        "sentiment_label": label,
-                        "sentiment_score": score,
-                    })
+            pairs = [(category, entity_text)
+                     for category, texts in entities.items()
+                     for entity_text in texts]
+            results = analyze_entity_sentiment_batch(
+                article["body_text"], [entity_text for _, entity_text in pairs])
+            scored = [{
+                "entity_text": entity_text,
+                "entity_category": category,
+                "sentiment_label": label,
+                "sentiment_score": score,
+            } for (category, entity_text), (label, score) in zip(pairs, results)]
             ops.delete_article_entity_sentiment(article["id"])
             ops.insert_article_entity_sentiment(article["id"], scored, ENTITY_SENTIMENT_MODEL_NAME)
             done += 1
