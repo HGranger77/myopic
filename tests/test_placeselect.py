@@ -4,9 +4,9 @@ from database import operations as ops
 from nlp import placeselect
 
 
-def _cand(text, sig=1, geo_name=None, mentions=1, person=0):
+def _cand(text, sig=1, geo_name=None, mentions=1, person=0, org=0):
     return {"key": placeselect.place_key(text), "text": text, "significant_articles": sig,
-            "mentions": mentions, "person_mentions": person,
+            "mentions": mentions, "person_mentions": person, "org_mentions": org,
             "geo": {"display_name": geo_name or text, "lat": 1.0, "lon": 2.0, "place_rank": 16, "radius_km": 5}}
 
 
@@ -14,6 +14,19 @@ def test_screen_drops_text_that_is_mostly_a_person_name():
     kabila = _cand("Kabila", mentions=1, person=7)
     sydney = _cand("Sydney", mentions=3, person=0)
     assert placeselect.screen_candidates([kabila, sydney]) == [sydney]
+
+
+def test_org_matches_penalise_but_never_drop_a_place():
+    swans = _cand("Sydney", mentions=2, org=3)  # "Sydney Swans" seen more often than Sydney the place
+    assert placeselect.screen_candidates([swans]) == [swans]  # still a candidate
+    assert placeselect.org_penalty(swans) == placeselect.ORG_PENALTY  # share capped at 1
+    clean = _cand("Perth", mentions=2, org=0)
+    assert placeselect.org_penalty(clean) == 0
+    # the penalty can tip a close call, but a clearly better-supported place survives it
+    close = placeselect.choose_place([swans, _cand("Brisbane")], {"Sydney": 0.62, "Brisbane": 0.55})
+    assert close[0]["text"] == "Brisbane"
+    clear = placeselect.choose_place([swans, _cand("Brisbane")], {"Sydney": 0.95, "Brisbane": 0.3})
+    assert clear[0]["text"] == "Sydney"
 
 
 def test_choose_takes_highest_nli_score_not_most_mentioned():
@@ -52,6 +65,7 @@ def test_story_place_candidates_counts_mentions_and_person_names():
     by_key = {c["key"]: c for c in ops.get_story_place_candidates(story_id)}
     assert by_key["goma"]["mentions"] == 2 and by_key["goma"]["headline_hits"] == 1
     assert by_key["kabila"]["person_mentions"] >= by_key["kabila"]["mentions"]  # screened out later
+    assert by_key["goma"]["org_mentions"] == 0
 
 
 def test_geolocate_stage_runs_the_five_steps_and_stamps_the_story(monkeypatch):

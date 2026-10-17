@@ -1043,14 +1043,16 @@ def get_story_place_candidates(story_id: int) -> list[dict]:
     """Every place (GPE/LOC/FAC) NER found in a story's articles, with the
     counts nlp.placeselect needs. No model runs here. Returns
     [{text, key, significant_articles, mentions, person_mentions,
-    headline_hits}, ...] ordered by significance + headline hits, strongest
+    org_mentions, headline_hits}, ...] ordered by significance + headline hits, strongest
     first.
 
     significant_articles: how many member articles pass
     nlp.matching.filter_significant_entities for this place (see
-    get_article_entities). person_mentions: how many PERSON/ORG entities in
-    the story contain this place's text as a word - only for one-word names
-    ("Kabila" in "Joseph Kabila"), 0 otherwise."""
+    get_article_entities). person_mentions / org_mentions: how many PERSON /
+    ORG entities in the story contain this place's text as a word - only
+    for one-word names ("Kabila" in "Joseph Kabila", "Sydney" in "Sydney
+    Swans"), 0 otherwise. nlp.placeselect drops on the first and only
+    penalises on the second."""
     import re
 
     from nlp.placeselect import place_key
@@ -1065,15 +1067,17 @@ def get_story_place_candidates(story_id: int) -> list[dict]:
             )
             rows = cur.fetchall()
     places: dict[str, dict] = {}
-    name_words: dict[str, int] = {}
+    person_words: dict[str, int] = {}
+    org_words: dict[str, int] = {}
     for row in rows:
         text, label = row["entity_text"], row["entity_label"]
         if label in ("GPE", "LOC", "FAC"):
             p = places.setdefault(place_key(text), {"text": text, "mentions": 0, "significant_articles": 0})
             p["mentions"] += 1
         if label in ("PERSON", "ORG"):
+            bucket = person_words if label == "PERSON" else org_words
             for word in re.findall(r"[a-z]{3,}", text.lower()):
-                name_words[word] = name_words.get(word, 0) + 1
+                bucket[word] = bucket.get(word, 0) + 1
     for article in articles:
         for text in get_article_entities(article["id"])["locations"]:
             p = places.setdefault(place_key(text), {"text": text, "mentions": 0, "significant_articles": 0})
@@ -1085,7 +1089,8 @@ def get_story_place_candidates(story_id: int) -> list[dict]:
         out.append({
             "key": key, "text": p["text"],
             "significant_articles": p["significant_articles"], "mentions": p["mentions"],
-            "person_mentions": name_words.get(words[0], 0) if len(words) == 1 else 0,
+            "person_mentions": person_words.get(words[0], 0) if len(words) == 1 else 0,
+            "org_mentions": org_words.get(words[0], 0) if len(words) == 1 else 0,
             "headline_hits": len(re.findall(r"(?<![a-z])" + re.escape(key) + r"(?![a-z])", headlines)),
         })
     # only places the pipeline's own significance filter or the headline vouches for

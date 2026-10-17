@@ -4,9 +4,11 @@ Used by the geolocate-story stage. The stage's steps, and what does each one:
 
   1. Candidates     NER places (GPE/LOC/FAC) already extracted by article-entities.
                     No model runs here - a database read.            (ops.get_story_place_candidates)
-  2. Name screen    Drops a candidate whose text is mostly used as a PERSON/ORG
-                    name in the same story (the surname "Kabila", the cricketer
-                    "Litchfield"). Plain counting.                   (screen_candidates)
+  2. Name screen    Counting, no model. A candidate that is mostly used as a PERSON
+                    name in the same story (the surname "Kabila") is dropped. One
+                    that also appears inside ORG names ("Sydney" in "Sydney
+                    Swans") is only penalised in step 5, since organisations are
+                    often named after real places.     (screen_candidates, ORG_PENALTY)
   3. Geocode        Looks each place up on OpenStreetMap's Nominatim; drops
                     anything that isn't a real place. No ML - an HTTP
                     call, cached in Postgres.                        (nlp.geocode)
@@ -14,7 +16,7 @@ Used by the geolocate-story stage. The stage's steps, and what does each one:
                     zero-shot NLI model tag-relevance uses, is asked how well
                     "This event happened in <place>." follows from the story's
                     headline + summary, once per candidate.          (nli_scores)
-  5. Choice         Picks the best-scoring place, steps down to a more specific
+  5. Choice         Picks the best-scoring place (less the ORG penalty), steps down to a more specific
                     place inside it if one is nearly as good, and returns nothing
                     if the best place is too weakly supported.      (choose_place)
 
@@ -34,6 +36,7 @@ HYPOTHESIS = "This event happened in {}."
 MAX_CANDIDATES = 8        # geocoded places sent to the model, per story
 MIN_NLI = 0.4             # best place's entailment must reach this, else no pin
 SIGNIFICANT_WEIGHT = 0.1  # small bonus per article that finds the place significant (max 3)
+ORG_PENALTY = 0.2         # score lost if the place's name is wholly inside ORG names (scaled by share)
 CHILD_MARGIN = 0.2        # a place inside the winner replaces it if within this score
 PRECISE_MIN_RANK = 12     # Nominatim place_rank at/above which a pin is "precise"
 _MAX_PREMISE_CHARS = 1500
@@ -45,9 +48,18 @@ def place_key(text: str) -> str:
 
 def screen_candidates(candidates: list[dict]) -> list[dict]:
     """Step 2. Each candidate: {key, mentions, person_mentions, ...}. Drops a
-    candidate when words of that exact text appear in PERSON/ORG entities at
-    least as often as the text appears as a place."""
+    candidate when its text appears inside PERSON entities at least as often
+    as it appears as a place. ORG matches are NOT dropped here - see
+    org_penalty()."""
     return [c for c in candidates if c["person_mentions"] < max(c["mentions"], 1)]
+
+
+def org_penalty(candidate: dict) -> float:
+    """How much of a place's score to take away because its name also appears
+    inside ORG names: ORG_PENALTY times the share of its mentions that look
+    like part of an organisation (capped at 1)."""
+    share = candidate["org_mentions"] / max(candidate["mentions"], 1)
+    return ORG_PENALTY * min(share, 1.0)
 
 
 def is_inside(child: dict, parent: dict) -> bool:
@@ -78,7 +90,7 @@ def choose_place(candidates: list[dict], scores: dict[str, float]):
     if not candidates:
         return None
     combined = {
-        c["key"]: scores[c["text"]] + SIGNIFICANT_WEIGHT * min(c["significant_articles"], 3)
+        c["key"]: scores[c["text"]] + SIGNIFICANT_WEIGHT * min(c["significant_articles"], 3) - org_penalty(c)
         for c in candidates
     }
     best = max(candidates, key=lambda c: combined[c["key"]])

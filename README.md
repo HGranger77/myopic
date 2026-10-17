@@ -113,10 +113,10 @@ nearby icons cluster, and each popup links back to the story. `geolocate-story` 
 five steps, only one of which is a model (see `nlp/placeselect.py`):
 
 1. **Candidates** - the places `article-entities` found (a database read).
-2. **Name screen** - drop a place whose text is mostly a person's or organisation's name in the same story ("Kabila", "Litchfield").
+2. **Name screen** - drop a place whose text is mostly a *person's* name in the same story ("Kabila"); a place that also appears inside *organisation* names ("Sydney" in "Sydney Swans") is only penalised in step 5, not dropped.
 3. **Geocode** - OpenStreetMap Nominatim, cached in `geocode_cache`; anything that isn't a real place is dropped. Override the endpoint with `MYOPIC_GEOCODER_URL`.
 4. **Score (ML)** - `bart-large-mnli` rates how well "This event happened in *place*." follows from the story's headline and summary.
-5. **Choice** - best score; a more specific place inside it (Sydney in Australia) wins if nearly as good; no pin if the best score is under 0.4.
+5. **Choice** - best score (less the organisation penalty); a more specific place inside it (Sydney in Australia) wins if nearly as good; no pin if the best score is under 0.4.
 
 A specific place is a solid pin; a country, region or continent is a faded pin with a dashed circle for
 the approximate area. Stories with no place above the cutoff don't appear. The accuracy audit and
