@@ -91,6 +91,16 @@ every incidental mention - see `nlp/matching.py`'s `filter_significant_entities(
 story-level equivalent (NER over every source's combined text) existed earlier but was removed -
 it was never read by anything.
 
+`geolocate-story` runs after `entity-sentiment` (it reads `article-entities`' places; it waits for
+`entity-sentiment` only so two model pods never overlap) and is scoped to relevant stories. Of its
+five steps only one is a model: `bart-large-mnli`, the same model and memory budget as
+`tag-relevance`, scoring "This event happened in *place*." against each candidate. The geocoder
+is plain HTTP calls to Nominatim (throttled to 1 req/s, every lookup cached in `geocode_cache`), so
+the pod needs outbound internet. A network failure leaves the story on the worklist for the next
+run; "no place cleared the cutoff" is recorded so it isn't retried. Each stage's log line shows the
+winning place, its NLI score and the next two candidates, so a wrong pin can be diagnosed from the
+log. See `nlp/placeselect.py` for the steps and `docs/geolocation-audit.md` for how it was tuned.
+
 `translate-article` sits right after `fetch-article-bodies`: translation is autoregressive
 (the same cost class as the disconnected LLM path, not `tag-relevance`'s one-shot classifier),
 so it's bounded to a prefix of each article rather than the full body - see `nlp/translate.py`.

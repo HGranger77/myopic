@@ -119,12 +119,25 @@ def stories_page(
     topic: Optional[str] = None,
     date: Optional[str] = None,
     q: Optional[str] = None,
-    page: int = 1,
+    page: Optional[int] = None,
     calendar_month: Optional[str] = None,
+    story: Optional[int] = None,
 ):
     q = q.strip() if q else None
     q = q or None  # blank or whitespace-only search box submission == no search
-    page = max(page, 1)
+    focus_story = story
+    if focus_story is not None and page is None:
+        # Arriving from a map popup: land on whichever page of the current
+        # filters actually contains that story, rather than always page 1.
+        page = 1
+        while True:
+            batch, total = ops.get_recent_stories_with_summaries(
+                limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE, topic=topic, date=date, q=q
+            )
+            if any(s["story_id"] == focus_story for s in batch) or page * PAGE_SIZE >= total:
+                break
+            page += 1
+    page = max(page or 1, 1)
     stories, total_count = ops.get_recent_stories_with_summaries(
         limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE, topic=topic, date=date, q=q
     )
@@ -133,6 +146,8 @@ def stories_page(
         # matched_entities is display text here, never compared against
         # anything (the topic query param matches raw canonical_name in SQL).
         story["matched_entities"] = [_display_name(e) for e in story["matched_entities"] if e]
+        if story["located"]:
+            story["map_href"] = f"/map{_query_string(date=story['updated_at'].date().isoformat(), story=story['story_id'])}"
         story["source_articles"] = ops.get_story_source_articles(story["story_id"])
         for article in story["source_articles"]:
             article["entities"] = ops.get_article_entities(article["id"])
@@ -185,6 +200,7 @@ def stories_page(
         "stories.html",
         {
             "stories": stories,
+            "focus_story": focus_story,
             "topics": topics,
             "all_topics_href": all_topics_href,
             "selected_topic": topic,

@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS articles (
     discovered_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     fetched_at         TIMESTAMPTZ
 );
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS entity_sentiment_checked_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source);
 -- HNSW supports incremental inserts well, unlike IVFFlat (which wants a
 -- representative sample up front) - a better fit for a table that grows by
@@ -195,4 +196,47 @@ CREATE TABLE IF NOT EXISTS article_sentiment (
     emotion_model_name  TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- CREATE TABLE IF NOT EXISTS doesn't add columns to a table that already
+-- exists, so databases created before emotion was added need these.
+ALTER TABLE article_sentiment ADD COLUMN IF NOT EXISTS emotion_label TEXT;
+ALTER TABLE article_sentiment ADD COLUMN IF NOT EXISTS emotion_score REAL;
+ALTER TABLE article_sentiment ADD COLUMN IF NOT EXISTS emotion_model_name TEXT;
 CREATE INDEX IF NOT EXISTS idx_article_sentiment_story ON article_sentiment(story_id);
+
+-- Cache of place-name -> coordinates lookups (nlp/geocode.py), keyed by the
+-- normalized query text. Negative results (lat/lon NULL) are cached too, so
+-- a place the geocoder can't resolve isn't re-queried on every run.
+CREATE TABLE IF NOT EXISTS geocode_cache (
+    id            SERIAL PRIMARY KEY,
+    query         TEXT NOT NULL UNIQUE,
+    lat           DOUBLE PRECISION,
+    lon           DOUBLE PRECISION,
+    display_name  TEXT,
+    place_rank    INTEGER,
+    radius_km     DOUBLE PRECISION,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE geocode_cache ADD COLUMN IF NOT EXISTS place_rank INTEGER;
+ALTER TABLE geocode_cache ADD COLUMN IF NOT EXISTS radius_km DOUBLE PRECISION;
+
+-- Where a story took place - one row per story, stamped by the
+-- geolocate-story stage even when no location could be found (lat/lon
+-- NULL), so "never checked" and "checked, nothing found" are distinguishable
+-- (same reasoning as articles.entities_checked_at). Powers the /map page.
+CREATE TABLE IF NOT EXISTS story_locations (
+    id             SERIAL PRIMARY KEY,
+    story_id       INTEGER NOT NULL UNIQUE REFERENCES stories(id) ON DELETE CASCADE,
+    location_text  TEXT,
+    lat            DOUBLE PRECISION,
+    lon            DOUBLE PRECISION,
+    -- precise: a specific settlement; otherwise the map shows an approximate
+    -- area of radius_km (a country, state or continent)
+    precise        BOOLEAN,
+    radius_km      DOUBLE PRECISION,
+    -- the NLI model's score that the story happened here (nlp/placeselect.py)
+    confidence     REAL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE story_locations ADD COLUMN IF NOT EXISTS confidence REAL;
+ALTER TABLE story_locations ADD COLUMN IF NOT EXISTS precise BOOLEAN;
+ALTER TABLE story_locations ADD COLUMN IF NOT EXISTS radius_km DOUBLE PRECISION;

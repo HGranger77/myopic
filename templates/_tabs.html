@@ -1,0 +1,7 @@
+{# Articles / Map tab switcher shared by /stories and /map. Expects `active`
+   ("articles" | "map") and optionally `tab_date` (YYYY-MM-DD) so switching tabs
+   keeps the day being viewed. #}
+<nav class="tabs" aria-label="View">
+  <a class="tab{{ ' active' if active == 'articles' }}" href="/stories{{ '?date=' ~ tab_date if tab_date }}"{% if active == 'articles' %} aria-current="page"{% endif %}>Articles</a>
+  <a class="tab{{ ' active' if active == 'map' }}" href="/map{{ '?date=' ~ tab_date if tab_date }}"{% if active == 'map' %} aria-current="page"{% endif %}>Map</a>
+</nav>

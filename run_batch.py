@@ -382,6 +382,98 @@ def article_entities(run_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# geolocate-story (one task, one ML model + a geocoder, loop over relevant
+# stories still missing a location)
+#
+# Decides where each relevant story happened. Five steps per story, only
+# ONE of which is a model (full rationale in nlp/placeselect.py):
+#
+#   1. candidates   NER places from article-entities          (database read)
+#   2. name screen  drop places that are really person names  (counting)
+#   3. geocode      OpenStreetMap Nominatim, cached           (HTTP, no ML)
+#   4. NLI scoring  facebook/bart-large-mnli                  (ML)
+#   5. choice       best score -> more specific child -> min-confidence cutoff
+#
+# Runs after article-entities (needs its places). Always writes a
+# story_locations row (lat/lon NULL if no place cleared the cutoff) so the
+# story isn't retried every run. A network failure is NOT recorded - the
+# story stays on the worklist for the next run.
+# ---------------------------------------------------------------------------
+
+def _story_premise(story_id: int) -> str:
+    articles = ops.get_story_articles(story_id)
+    return f"{articles[0]['headline']}. {ops.get_story_summary_text(story_id) or ''}"
+
+
+def _locate(story_id: int):
+    """Runs the five steps. Returns (candidate, nli_score, runners_up) or
+    None; runners_up is [(place, nli_score), ...] for the log."""
+    from nlp import placeselect
+    from nlp.geocode import geocode, plausible_place
+
+    # 1. candidates (NER, from article-entities) + 2. name screen
+    candidates = placeselect.screen_candidates(
+        [c for c in ops.get_story_place_candidates(story_id) if plausible_place(c["text"])]
+    )
+
+    # 3. geocode - keep only candidates that resolve to a real place
+    located = []
+    for c in candidates:
+        geo = ops.get_cached_geocode(c["key"])
+        if geo is None:
+            geo = geocode(c["key"])
+            ops.set_cached_geocode(c["key"], geo)
+            geo = geo or {}
+        if geo.get("lat") is not None:
+            located.append({**c, "geo": geo})
+        if len(located) == placeselect.MAX_CANDIDATES:
+            break
+    if not located:
+        return None
+
+    # 4. NLI scoring - the only model call
+    scores = placeselect.nli_scores(_story_premise(story_id), [c["text"] for c in located])
+
+    # 5. choice
+    chosen = placeselect.choose_place(located, scores)
+    if chosen is None:
+        return None
+    runners_up = sorted(((t, s) for t, s in scores.items() if t != chosen[0]["text"]), key=lambda x: -x[1])[:2]
+    return chosen[0], chosen[1], runners_up
+
+
+def geolocate_story(run_id: int) -> int:
+    # run_id unused - gap-based worklist, see sentiment_article()'s comment.
+    from nlp.placeselect import PRECISE_MIN_RANK
+
+    todo = ops.get_relevant_stories_missing_location()
+    located = 0
+    for i, story_id in enumerate(todo, start=1):
+        try:
+            found = _locate(story_id)
+            if found is None:
+                ops.upsert_story_location(story_id, None, None, None)
+                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: no place cleared the cutoff")
+                continue
+            place, score, runners_up = found
+            geo = place["geo"]
+            precise = geo["place_rank"] >= PRECISE_MIN_RANK
+            ops.upsert_story_location(
+                story_id, place["text"], geo["lat"], geo["lon"], precise,
+                None if precise else geo["radius_km"], score,
+            )
+            located += 1
+            others = ", ".join(f"{t} {s:.2f}" for t, s in runners_up)
+            print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: {place['text']} "
+                  f"(nli {score:.2f}{'' if precise else ', approximate'}; next: {others})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[geolocate-story] {i}/{len(todo)} failed for story {story_id}: {exc}", file=sys.stderr)
+
+    print(f"[geolocate-story] located {located}/{len(todo)} stories")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # entity-sentiment (one task, ABSA model, loop over relevant articles still
 # missing it)
 #
@@ -479,7 +571,7 @@ def _parse_args() -> argparse.Namespace:
 
     for name in [
         "cluster-stories", "summarize-story", "tag-relevance", "sentiment-article",
-        "article-entities", "entity-sentiment", "finalize",
+        "article-entities", "geolocate-story", "entity-sentiment", "finalize",
     ]:
         p = sub.add_parser(name)
         p.add_argument("--run-id", type=int, required=True)
@@ -512,6 +604,8 @@ def main() -> int:
             return sentiment_article(args.run_id)
         if args.command == "article-entities":
             return article_entities(args.run_id)
+        if args.command == "geolocate-story":
+            return geolocate_story(args.run_id)
         if args.command == "entity-sentiment":
             return entity_sentiment(args.run_id)
         if args.command == "finalize":

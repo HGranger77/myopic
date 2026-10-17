@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>myopic — story map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.min.css">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5; --text: #1a1a1a; --muted: #6b6b6b; --accent: #2f5fd6; --border: #e4e4e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15161a; --text: #ececea; --muted: #9a9a9a; --accent: #7fa0ff; --border: #2d2e34; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; }
+  .page { max-width: 1080px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  h1 { margin: 0 0 .25rem; }
+  .sub { color: var(--muted); margin: 0 0 1rem; }
+  .toolbar { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  .toolbar a { color: var(--accent); text-decoration: none; }
+  .toolbar input { padding: .35rem .5rem; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); }
+  #map { height: 65vh; min-height: 360px; border: 1px solid var(--border); border-radius: 8px; }
+  .popup-loc { color: #6b6b6b; font-size: .85em; margin: 0 0 .25rem; }
+  .story-pin { filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .story-pin.approx { opacity: .55; }
+  .legend { color: var(--muted); font-size: .85rem; margin-top: .75rem; }
+  .tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--border); margin-bottom: 1.25rem; }
+  .tab { padding: .5rem 1rem; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .empty { color: var(--muted); margin-top: 1rem; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Story map</h1>
+  <p class="sub">Where each day's reportable stories took place.</p>
+  {% with active="map", tab_date=date %}{% include "_tabs.html" %}{% endwith %}
+  <div class="toolbar">
+    <form method="get" action="/map">
+      <input type="date" name="date" value="{{ date or '' }}" onchange="this.form.submit()">
+    </form>
+    <span class="sub" style="margin:0">{{ story_count }} located stor{{ 'y' if story_count == 1 else 'ies' }}</span>
+  </div>
+  <div id="map"></div>
+  <p class="legend">Solid icons mark a specific place. Faded icons with a dashed circle are approximate &mdash; the story only names a country, region or continent.</p>
+  {% if not markers %}<p class="empty">No located stories for this day.</p>{% endif %}
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
+<script>
+  const markers = {{ markers | tojson }};
+  const map = L.map("map").setView([20, 0], 2);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  }).addTo(map);
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const PIN_SVG = '<svg width="26" height="26" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" fill="#2f5fd6" stroke="#fff" stroke-width="1.5"/><path d="M7 9h10M7 12h10M7 15h6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  const icon = L.divIcon({ className: "story-pin", html: PIN_SVG, iconSize: [26, 26], iconAnchor: [13, 13], popupAnchor: [0, -12] });
+
+  const approxIcon = L.divIcon({ className: "story-pin approx", html: PIN_SVG, iconSize: [26, 26], iconAnchor: [13, 13], popupAnchor: [0, -12] });
+
+  // Nearby stories collapse into a count badge; clicking one zooms in, and
+  // stories at the exact same coordinates spiderfy apart at max zoom.
+  const cluster = L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 45 });
+  const DAY = {{ date | tojson }};
+  const focusStory = {{ focus_story | tojson }};
+  let focusMarker = null;
+  const bounds = [];
+  markers.forEach((m) => {
+    const pos = [m.lat, m.lon];
+    bounds.push(pos);
+    if (!m.precise) {
+      // Vague place (country/state/continent): dashed circle for the approximate area.
+      L.circle(pos, { radius: Math.min(m.radius_km || 200, 1500) * 1000, color: "#2f5fd6",
+        weight: 1, dashArray: "5 5", fillOpacity: 0.06, interactive: false }).addTo(map);
+    }
+    const marker = L.marker(pos, { icon: m.precise ? icon : approxIcon, title: m.headline || "" }).bindPopup(
+      `<p class="popup-loc">${esc(m.location)}${m.precise ? "" : " (approximate)"}${m.topics.length ? " · " + esc(m.topics.join(", ")) : ""}</p>` +
+      `<strong>${esc(m.headline)}</strong><p>${esc(m.summary)}</p>` +
+      `<p><a href="/stories?date=${encodeURIComponent(DAY)}&story=${m.story_id}#story-${m.story_id}">View full story &rarr;</a></p>`,
+      { maxWidth: 320 }
+    );
+    cluster.addLayer(marker);
+    if (m.story_id === focusStory) focusMarker = marker;
+  });
+  map.addLayer(cluster);
+  // Arriving from a story's pin icon on /stories: zoom to it and open its popup.
+  if (focusMarker) {
+    cluster.zoomToShowLayer(focusMarker, () => focusMarker.openPopup());
+  }
+  if (bounds.length && !focusMarker) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 6 });
+</script>
+</body>
+</html>
