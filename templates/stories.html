@@ -464,9 +464,16 @@
             {% if article.sentiment_label %}
             <span class="sentiment {{ article.sentiment_label|lower }}">{{ article.sentiment_label }}</span>
             {% endif %}
-            {% if article.emotion_label %}
+            {# Emotion badge disabled for now - the 7-label read (anger/
+               disgust/fear/joy/neutral/sadness/surprise) needs refinement
+               before it's user-facing again, see plan.md. The pipeline
+               still computes and stores it (sentiment-article, nlp/emotion.py)
+               - this is a display-only toggle, not a removal, so data keeps
+               accumulating and this can be flipped back on by restoring the
+               block below. #}
+            {# {% if article.emotion_label %}
             <span class="emotion {{ article.emotion_label }}">{{ article.emotion_label }}</span>
-            {% endif %}
+            {% endif %} #}
           </div>
           {% if article.entities.people or article.entities.organizations or article.entities.locations %}
           <div class="entities">
