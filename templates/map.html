@@ -71,6 +71,7 @@
   // Nearby stories collapse into a count badge; clicking one zooms in, and
   // stories at the exact same coordinates spiderfy apart at max zoom.
   const cluster = L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 45 });
+  const DAY = {{ date | tojson }};
   const focusStory = {{ focus_story | tojson }};
   let focusMarker = null;
   const bounds = [];
@@ -84,7 +85,8 @@
     }
     const marker = L.marker(pos, { icon: m.precise ? icon : approxIcon, title: m.headline || "" }).bindPopup(
       `<p class="popup-loc">${esc(m.location)}${m.precise ? "" : " (approximate)"}${m.topics.length ? " · " + esc(m.topics.join(", ")) : ""}</p>` +
-      `<strong>${esc(m.headline)}</strong><p>${esc(m.summary)}</p>`,
+      `<strong>${esc(m.headline)}</strong><p>${esc(m.summary)}</p>` +
+      `<p><a href="/stories?date=${encodeURIComponent(DAY)}&story=${m.story_id}#story-${m.story_id}">View full story &rarr;</a></p>`,
       { maxWidth: 320 }
     );
     cluster.addLayer(marker);

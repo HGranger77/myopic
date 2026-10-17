@@ -494,3 +494,21 @@ def test_map_page_has_tabs_and_focus_story():
     html = client.get(f"/map?story={story_id}").text
     assert 'aria-current="page">Map' in html
     assert f"const focusStory = {story_id};" in html
+
+
+def test_stories_page_story_param_lands_on_its_page_and_highlights_it():
+    ids = []
+    for i in range(22):  # PAGE_SIZE is 20, so the oldest story lands on page 2
+        story_id, _ = _seed_matched_story(url=f"https://www.nine.com.au/s{i}.html", entity_name=f"E{i}")
+        ids.append(story_id)
+    oldest = ids[0]
+    html = client.get(f"/stories?story={oldest}").text
+    assert f'id="story-{oldest}"' in html
+    assert 'class="story focused"' in html
+
+
+def test_map_popup_links_back_to_story_page():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get("/map").text
+    assert "/stories?date=" in html and "#story-" in html and "View full story" in html

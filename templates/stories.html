@@ -101,6 +101,7 @@
     padding: 1.25rem 1.4rem;
     margin-bottom: 1.1rem;
   }
+  .story.focused { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
   .story-header {
     display: flex;
     justify-content: space-between;
@@ -439,7 +440,7 @@
 
   {% if stories %}
     {% for story in stories %}
-    <article class="story">
+    <article class="story{% if story.story_id == focus_story %} focused" id="story-{{ story.story_id }}{% endif %}">
       <div class="story-header">
         <h2 class="story-title">
           {{ story.source_articles[0].headline if story.source_articles else "Untitled story" }}
