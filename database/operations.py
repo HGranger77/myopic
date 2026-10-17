@@ -650,20 +650,36 @@ def get_story_summary_text(story_id: int) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def upsert_article_sentiment(
-    article_id: int, story_id: int, label: str, score: float, model_name: str
+    article_id: int,
+    story_id: int,
+    label: str,
+    score: float,
+    model_name: str,
+    emotion_label: Optional[str] = None,
+    emotion_score: Optional[float] = None,
+    emotion_model_name: Optional[str] = None,
 ) -> None:
+    """emotion_* is optional - sentiment_article() always passes it (both
+    classifiers run in the same stage), but callers that only care about
+    sentiment (tests, one-off backfills) aren't forced to thread emotion
+    data through for no reason."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO article_sentiment (article_id, story_id, sentiment_label, sentiment_score, model_name)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO article_sentiment
+                    (article_id, story_id, sentiment_label, sentiment_score, model_name,
+                     emotion_label, emotion_score, emotion_model_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (article_id) DO UPDATE
                     SET sentiment_label = EXCLUDED.sentiment_label,
                         sentiment_score = EXCLUDED.sentiment_score,
-                        model_name = EXCLUDED.model_name
+                        model_name = EXCLUDED.model_name,
+                        emotion_label = EXCLUDED.emotion_label,
+                        emotion_score = EXCLUDED.emotion_score,
+                        emotion_model_name = EXCLUDED.emotion_model_name
                 """,
-                (article_id, story_id, label, score, model_name),
+                (article_id, story_id, label, score, model_name, emotion_label, emotion_score, emotion_model_name),
             )
 
 
@@ -741,6 +757,90 @@ def get_article_entities(article_id: int) -> dict:
         else:  # GPE or LOC
             buckets["locations"].append(ent)
     return {category: filter_significant_entities(entities) for category, entities in buckets.items()}
+
+
+# ---------------------------------------------------------------------------
+# article_entity_sentiment - aspect-based sentiment per significant entity
+# (see nlp/entity_sentiment.py), one-shot per article like article_entities
+# ---------------------------------------------------------------------------
+
+def get_relevant_articles_missing_entity_sentiment() -> list[dict]:
+    """Every watchlist-relevant article entity-sentiment hasn't checked yet.
+    Gap-based on entity_sentiment_checked_at, not on whether
+    article_entity_sentiment rows exist - same reasoning as
+    get_relevant_articles_missing_entities(), since an article with zero
+    significant entities would otherwise look permanently unprocessed.
+    Returns [{article_id}, ...]."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT a.id AS article_id FROM articles a "
+                "WHERE a.is_relevant = TRUE AND a.entity_sentiment_checked_at IS NULL"
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def delete_article_entity_sentiment(article_id: int) -> None:
+    """Makes entity-sentiment safe to retry without duplicating rows - same
+    reasoning as delete_article_entities()."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM article_entity_sentiment WHERE article_id = %s", (article_id,))
+
+
+def insert_article_entity_sentiment(article_id: int, scored_entities: Iterable[dict], model_name: str) -> None:
+    """scored_entities: iterable of {entity_text, entity_category, sentiment_label,
+    sentiment_score} - entity_category is one of people/organizations/locations
+    (get_article_entities()'s bucket names). Always stamps
+    articles.entity_sentiment_checked_at, even when scored_entities is empty -
+    see get_relevant_articles_missing_entity_sentiment()'s docstring for why."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for ent in scored_entities:
+                cur.execute(
+                    """
+                    INSERT INTO article_entity_sentiment
+                        (article_id, entity_text, entity_category, sentiment_label, sentiment_score, model_name)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (article_id, entity_category, entity_text) DO UPDATE
+                        SET sentiment_label = EXCLUDED.sentiment_label,
+                            sentiment_score = EXCLUDED.sentiment_score,
+                            model_name = EXCLUDED.model_name
+                    """,
+                    (
+                        article_id,
+                        ent["entity_text"],
+                        ent["entity_category"],
+                        ent["sentiment_label"],
+                        ent["sentiment_score"],
+                        model_name,
+                    ),
+                )
+            cur.execute("UPDATE articles SET entity_sentiment_checked_at = now() WHERE id = %s", (article_id,))
+
+
+def get_article_entity_sentiment(article_id: int) -> dict:
+    """{(category, entity_text_lower): {"label": ..., "score": ...}} for one
+    article - a lookup the /stories page uses to annotate each entity tag
+    with its own sentiment, keyed case-insensitively since display text
+    elsewhere (get_article_entities) is matched the same way."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT entity_text, entity_category, sentiment_label, sentiment_score
+                FROM article_entity_sentiment WHERE article_id = %s
+                """,
+                (article_id,),
+            )
+            rows = cur.fetchall()
+    return {
+        (row["entity_category"], row["entity_text"].lower()): {
+            "label": row["sentiment_label"],
+            "score": row["sentiment_score"],
+        }
+        for row in rows
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -905,7 +1005,8 @@ def get_story_source_articles(story_id: int) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT a.id, a.source, a.url, a.headline, asent.sentiment_label, asent.sentiment_score
+                SELECT a.id, a.source, a.url, a.headline,
+                    asent.sentiment_label, asent.sentiment_score, asent.emotion_label, asent.emotion_score
                 FROM articles a
                 JOIN story_articles sa ON sa.article_id = a.id
                 LEFT JOIN article_sentiment asent ON asent.article_id = a.id

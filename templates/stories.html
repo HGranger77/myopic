@@ -20,6 +20,13 @@
     --person-bg: #fdf0db; --person-text: #966d1f;
     --org-bg: #eee3fb; --org-text: #6b3fb8;
     --location-bg: #dff3f1; --location-text: #1c7f73;
+    --anger-bg: #fbe3e0; --anger-text: #c14a2e;
+    --disgust-bg: #e7f0dc; --disgust-text: #5b7a2e;
+    --fear-bg: #ece3fb; --fear-text: #6d4fb8;
+    --joy-bg: #fdf3d4; --joy-text: #9a7a0a;
+    --sadness-bg: #dde8f7; --sadness-text: #35598f;
+    --surprise-bg: #fbe3f0; --surprise-text: #b83a84;
+    --neutral-bg: #eceae6; --neutral-text: #6b6b6b;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -36,6 +43,13 @@
       --person-bg: #3a3020; --person-text: #e3bf6f;
       --org-bg: #2f2640; --org-text: #c6a6f5;
       --location-bg: #1c3330; --location-text: #7fd6c7;
+      --anger-bg: #3a241f; --anger-text: #e9a08c;
+      --disgust-bg: #28301f; --disgust-text: #b3d18c;
+      --fear-bg: #2c2440; --fear-text: #c3aef5;
+      --joy-bg: #362f1a; --joy-text: #e8cd6f;
+      --sadness-bg: #1f2b3d; --sadness-text: #9ac1f5;
+      --surprise-bg: #3a2232; --surprise-text: #f0a8d4;
+      --neutral-bg: #2a2b30; --neutral-text: #9a9a9a;
     }
   }
   * { box-sizing: border-box; }
@@ -186,6 +200,21 @@
   }
   .sentiment.positive { background: var(--pos-bg); color: var(--pos-text); }
   .sentiment.negative { background: var(--neg-bg); color: var(--neg-text); }
+  .emotion {
+    font-size: 0.72rem;
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 0.1rem 0.5rem;
+    flex-shrink: 0;
+    text-transform: capitalize;
+  }
+  .emotion.anger { background: var(--anger-bg); color: var(--anger-text); }
+  .emotion.disgust { background: var(--disgust-bg); color: var(--disgust-text); }
+  .emotion.fear { background: var(--fear-bg); color: var(--fear-text); }
+  .emotion.joy { background: var(--joy-bg); color: var(--joy-text); }
+  .emotion.sadness { background: var(--sadness-bg); color: var(--sadness-text); }
+  .emotion.surprise { background: var(--surprise-bg); color: var(--surprise-text); }
+  .emotion.neutral { background: var(--neutral-bg); color: var(--neutral-text); }
   .source-item {
     display: flex;
     flex-direction: column;
@@ -205,6 +234,17 @@
   .entity-tag.person { background: var(--person-bg); color: var(--person-text); }
   .entity-tag.org { background: var(--org-bg); color: var(--org-text); }
   .entity-tag.location { background: var(--location-bg); color: var(--location-text); }
+  .entity-sentiment-dot {
+    display: inline-block;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    margin-right: 0.3rem;
+    vertical-align: middle;
+  }
+  .entity-sentiment-dot.positive { background: var(--pos-text); }
+  .entity-sentiment-dot.negative { background: var(--neg-text); }
+  .entity-sentiment-dot.neutral { background: var(--muted); }
   .empty {
     color: var(--muted);
     padding: 3rem 0;
@@ -440,12 +480,22 @@
             {% if article.sentiment_label %}
             <span class="sentiment {{ article.sentiment_label|lower }}">{{ article.sentiment_label }}</span>
             {% endif %}
+            {# Emotion badge disabled for now - the 7-label read (anger/
+               disgust/fear/joy/neutral/sadness/surprise) needs refinement
+               before it's user-facing again, see plan.md. The pipeline
+               still computes and stores it (sentiment-article, nlp/emotion.py)
+               - this is a display-only toggle, not a removal, so data keeps
+               accumulating and this can be flipped back on by restoring the
+               block below. #}
+            {# {% if article.emotion_label %}
+            <span class="emotion {{ article.emotion_label }}">{{ article.emotion_label }}</span>
+            {% endif %} #}
           </div>
           {% if article.entities.people or article.entities.organizations or article.entities.locations %}
           <div class="entities">
-            {% for p in article.entities.people %}<span class="entity-tag person">{{ p }}</span>{% endfor %}
-            {% for o in article.entities.organizations %}<span class="entity-tag org">{{ o }}</span>{% endfor %}
-            {% for l in article.entities.locations %}<span class="entity-tag location">{{ l }}</span>{% endfor %}
+            {% for p in article.entities.people %}<span class="entity-tag person">{% set sent = article.entity_sentiment.people[p] %}{% if sent %}<span class="entity-sentiment-dot {{ sent|lower }}" title="{{ sent }}"></span>{% endif %}{{ p }}</span>{% endfor %}
+            {% for o in article.entities.organizations %}<span class="entity-tag org">{% set sent = article.entity_sentiment.organizations[o] %}{% if sent %}<span class="entity-sentiment-dot {{ sent|lower }}" title="{{ sent }}"></span>{% endif %}{{ o }}</span>{% endfor %}
+            {% for l in article.entities.locations %}<span class="entity-tag location">{% set sent = article.entity_sentiment.locations[l] %}{% if sent %}<span class="entity-sentiment-dot {{ sent|lower }}" title="{{ sent }}"></span>{% endif %}{{ l }}</span>{% endfor %}
           </div>
           {% endif %}
         </div>

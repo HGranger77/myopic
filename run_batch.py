@@ -14,9 +14,9 @@ tag-relevance classify that short summary against the watchlist and stamp
 the verdict onto the story's member articles. This moved deliberately - see
 tag_relevance()'s docstring below for why checking the raw article text
 directly was both slower and less accurate than checking the summary.
-sentiment-article and article-entities, the two stages after tag-relevance,
-are scoped back down to the relevant subset, since there's no point paying
-for either on stories nobody's watching for.
+sentiment-article, article-entities, and entity-sentiment - the stages after
+tag-relevance - are scoped back down to the relevant subset, since there's
+no point paying for any of them on stories nobody's watching for.
 """
 import argparse
 import asyncio
@@ -323,6 +323,8 @@ def sentiment_article(run_id: int) -> int:
     # --run-id uniformly (see this file's module docstring) - removing it
     # here would mean this is the one stage whose Argo task has no
     # parameters, for no real benefit.
+    from nlp.emotion import MODEL_NAME as EMOTION_MODEL_NAME
+    from nlp.emotion import analyze as analyze_emotion
     from nlp.sentiment import MODEL_NAME as SENTIMENT_MODEL_NAME
     from nlp.sentiment import analyze as analyze_sentiment
 
@@ -332,9 +334,14 @@ def sentiment_article(run_id: int) -> int:
         try:
             article = ops.get_article(row["article_id"])
             label, score = analyze_sentiment(article["body_text"])
-            ops.upsert_article_sentiment(article["id"], row["story_id"], label, score, SENTIMENT_MODEL_NAME)
+            emotion_label, emotion_score = analyze_emotion(article["body_text"])
+            ops.upsert_article_sentiment(
+                article["id"], row["story_id"], label, score, SENTIMENT_MODEL_NAME,
+                emotion_label, emotion_score, EMOTION_MODEL_NAME,
+            )
             done += 1
-            print(f"[sentiment-article] {i}/{len(todo)} article {article['id']}: {label} ({score:.3f})")
+            print(f"[sentiment-article] {i}/{len(todo)} article {article['id']}: "
+                  f"{label} ({score:.3f}), {emotion_label} ({emotion_score:.3f})")
         except Exception as exc:  # noqa: BLE001
             print(f"[sentiment-article] {i}/{len(todo)} failed for article "
                   f"{row['article_id']}: {exc}", file=sys.stderr)
@@ -438,6 +445,54 @@ def geolocate_story(run_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# entity-sentiment (one task, ABSA model, loop over relevant articles still
+# missing it)
+#
+# Must run strictly after article-entities - its worklist is independently
+# gap-based (is_relevant + not yet checked, same pattern as every other
+# stage here), but it reads ops.get_article_entities() for its entity list,
+# which is only populated once article-entities has processed that article.
+# The Argo DAG enforces this with an explicit dependency
+# (article-entities -> entity-sentiment); don't run this stage any other
+# way, or an article entity-sentiment reaches before article-entities does
+# would look like it has zero significant entities and never get a second
+# chance (entity_sentiment_checked_at gets stamped regardless).
+# ---------------------------------------------------------------------------
+
+def entity_sentiment(run_id: int) -> int:
+    # run_id unused - see sentiment_article()'s comment above for why.
+    from nlp.entity_sentiment import MODEL_NAME as ENTITY_SENTIMENT_MODEL_NAME
+    from nlp.entity_sentiment import analyze as analyze_entity_sentiment
+
+    todo = ops.get_relevant_articles_missing_entity_sentiment()
+    done = 0
+    for i, row in enumerate(todo, start=1):
+        try:
+            article = ops.get_article(row["article_id"])
+            entities = ops.get_article_entities(article["id"])
+            scored = []
+            for category, texts in entities.items():
+                for entity_text in texts:
+                    label, score = analyze_entity_sentiment(article["body_text"], entity_text)
+                    scored.append({
+                        "entity_text": entity_text,
+                        "entity_category": category,
+                        "sentiment_label": label,
+                        "sentiment_score": score,
+                    })
+            ops.delete_article_entity_sentiment(article["id"])
+            ops.insert_article_entity_sentiment(article["id"], scored, ENTITY_SENTIMENT_MODEL_NAME)
+            done += 1
+            print(f"[entity-sentiment] {i}/{len(todo)} article {article['id']}: {len(scored)} entities scored")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[entity-sentiment] {i}/{len(todo)} failed for article "
+                  f"{row['article_id']}: {exc}", file=sys.stderr)
+
+    print(f"[entity-sentiment] processed {done}/{len(todo)} articles")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # finalize (one task, no model, DB accounting)
 # ---------------------------------------------------------------------------
 
@@ -485,7 +540,10 @@ def _parse_args() -> argparse.Namespace:
     for name in ["fetch-article-bodies", "translate-article", "embed-article"]:
         sub.add_parser(name)
 
-    for name in ["cluster-stories", "summarize-story", "tag-relevance", "sentiment-article", "article-entities", "geolocate-story", "finalize"]:
+    for name in [
+        "cluster-stories", "summarize-story", "tag-relevance", "sentiment-article",
+        "article-entities", "geolocate-story", "entity-sentiment", "finalize",
+    ]:
         p = sub.add_parser(name)
         p.add_argument("--run-id", type=int, required=True)
 
@@ -519,6 +577,8 @@ def main() -> int:
             return article_entities(args.run_id)
         if args.command == "geolocate-story":
             return geolocate_story(args.run_id)
+        if args.command == "entity-sentiment":
+            return entity_sentiment(args.run_id)
         if args.command == "finalize":
             return finalize(args.run_id)
         raise AssertionError(f"unhandled command: {args.command}")

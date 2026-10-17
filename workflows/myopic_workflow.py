@@ -201,10 +201,15 @@ with CronWorkflow(
         inputs=[Parameter(name="run-id")],
         env=ENV,
         env_from=ENV_FROM,
-        # cpu_limit=2 must match nlp/sentiment.py's _N_THREADS. Lower than
-        # summarize-story/tag-relevance's 4 since this runs CONCURRENTLY
-        # with article-entities (both depend on tag-relevance), not alone.
-        resources=Resources(cpu_request="1", cpu_limit="2", memory_request="512Mi", memory_limit="1Gi"),
+        # cpu_limit=2 must match nlp/sentiment.py's and nlp/emotion.py's
+        # _N_THREADS. Lower than summarize-story/tag-relevance's 4 since
+        # this runs CONCURRENTLY with article-entities (both depend on
+        # tag-relevance), not alone. memory bumped from the original 512Mi/
+        # 1Gi now that this pod loads two models (sentiment + emotion)
+        # instead of one - distilroberta-base is a bit bigger than
+        # distilbert-base, so budgeted generously rather than measured yet;
+        # revisit if this OOMKills on a real run.
+        resources=Resources(cpu_request="1", cpu_limit="2", memory_request="768Mi", memory_limit="1536Mi"),
     )
 
     article_entities = Container(
@@ -230,6 +235,27 @@ with CronWorkflow(
         env_from=ENV_FROM,
         # No model - just throttled (1 req/s) geocoder HTTP calls, cached in Postgres.
         resources=Resources(cpu_request="100m", cpu_limit="300m", memory_request="128Mi", memory_limit="256Mi"),
+    )
+
+    entity_sentiment = Container(
+        name="entity-sentiment",
+        image=IMAGE,
+        image_pull_policy="Never",
+        command=["python", "run_batch.py", "entity-sentiment", "--run-id", "{{inputs.parameters.run-id}}"],
+        inputs=[Parameter(name="run-id")],
+        env=ENV,
+        env_from=ENV_FROM,
+        # cpu_limit=2 must match nlp/entity_sentiment.py's _N_THREADS. Must
+        # run strictly after article-entities (depends on its output, not
+        # just on tag-relevance - see entity_sentiment()'s docstring in
+        # run_batch.py), so it can briefly overlap with sentiment-article
+        # rather than ever running fully alone - budgeted the same as
+        # sentiment-article's own concurrent-not-alone allocation.
+        # One classifier call PER SIGNIFICANT ENTITY per article (typically
+        # 3-10), not one per article like sentiment-article/article-entities
+        # - a real multiplier on inference count, revisit if this makes the
+        # pipeline's total wall-clock noticeably worse.
+        resources=Resources(cpu_request="1", cpu_limit="2", memory_request="768Mi", memory_limit="1536Mi"),
     )
 
     finalize = Container(
@@ -268,13 +294,14 @@ with CronWorkflow(
 
         sa = sentiment_article(name="sentiment-article", arguments=_run_id_arg(), dependencies=["tag-relevance"])
         ae = article_entities(name="article-entities", arguments=_run_id_arg(), dependencies=["tag-relevance"])
+        es = entity_sentiment(name="entity-sentiment", arguments=_run_id_arg(), dependencies=["article-entities"])
 
         gs = geolocate_story(name="geolocate-story", arguments=_run_id_arg(), dependencies=["article-entities"])
 
         fin = finalize(
             name="finalize",
             arguments=_run_id_arg(),
-            dependencies=["sentiment-article", "geolocate-story"],
+            dependencies=["sentiment-article", "entity-sentiment", "geolocate-story"],
         )
 
 

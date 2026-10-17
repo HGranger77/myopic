@@ -268,10 +268,10 @@ spec:
         resources:
           limits:
             cpu: '2'
-            memory: 1Gi
+            memory: 1536Mi
           requests:
             cpu: '1'
-            memory: 512Mi
+            memory: 768Mi
       inputs:
         parameters:
         - name: run-id
@@ -328,6 +328,34 @@ spec:
           requests:
             cpu: 100m
             memory: 128Mi
+      inputs:
+        parameters:
+        - name: run-id
+    - name: entity-sentiment
+      container:
+        image: myopic-batch:latest
+        imagePullPolicy: Never
+        command:
+        - python
+        - run_batch.py
+        - entity-sentiment
+        - --run-id
+        - '{{inputs.parameters.run-id}}'
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        envFrom:
+        - configMapRef:
+            name: myopic-db-config
+        - secretRef:
+            name: postgres-secret
+        resources:
+          limits:
+            cpu: '2'
+            memory: 1536Mi
+          requests:
+            cpu: '1'
+            memory: 768Mi
       inputs:
         parameters:
         - name: run-id
@@ -434,6 +462,14 @@ spec:
             parameters:
             - name: run-id
               value: '{{tasks.start-run.outputs.parameters.run-id}}'
+        - name: entity-sentiment
+          template: entity-sentiment
+          dependencies:
+          - article-entities
+          arguments:
+            parameters:
+            - name: run-id
+              value: '{{tasks.start-run.outputs.parameters.run-id}}'
         - name: geolocate-story
           template: geolocate-story
           dependencies:
@@ -446,6 +482,7 @@ spec:
           template: finalize
           dependencies:
           - sentiment-article
+          - entity-sentiment
           - geolocate-story
           arguments:
             parameters:

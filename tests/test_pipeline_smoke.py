@@ -3,6 +3,8 @@ from pathlib import Path
 import run_batch
 from database import operations as ops
 from nlp import embedding as embedding_module
+from nlp import emotion as emotion_module
+from nlp import entity_sentiment as entity_sentiment_module
 from nlp import ner as ner_module
 from nlp import sentiment as sentiment_module
 from nlp import summarize as summarize_module
@@ -67,6 +69,14 @@ def _fake_analyze_sentiment(text):
     return "POSITIVE", 0.95
 
 
+def _fake_analyze_emotion(text):
+    return "joy", 0.87
+
+
+def _fake_analyze_entity_sentiment(text, entity):
+    return "Positive", 0.93
+
+
 def _patch_models(monkeypatch):
     # run_batch imports each nlp.* module LOCALLY inside the function that
     # needs it (so lightweight stages don't pay for torch/spacy imports they
@@ -80,6 +90,8 @@ def _patch_models(monkeypatch):
     monkeypatch.setattr(embedding_module, "embed", _fake_embed)
     monkeypatch.setattr(summarize_module, "summarize", _fake_summarize)
     monkeypatch.setattr(sentiment_module, "analyze", _fake_analyze_sentiment)
+    monkeypatch.setattr(emotion_module, "analyze", _fake_analyze_emotion)
+    monkeypatch.setattr(entity_sentiment_module, "analyze", _fake_analyze_entity_sentiment)
 
 
 def test_pipeline_end_to_end(monkeypatch, tmp_path):
@@ -89,8 +101,10 @@ def test_pipeline_end_to_end(monkeypatch, tmp_path):
 
     # Mirrors the full Argo DAG: start-run -> discover -> fetch-article-bodies
     # -> translate-article -> embed-article -> cluster-stories ->
-    # summarize-story -> tag-relevance ->
-    # [sentiment-article, article-entities] -> finalize.
+    # summarize-story -> tag-relevance -> [sentiment-article,
+    # article-entities -> entity-sentiment] -> finalize. entity-sentiment
+    # must run AFTER article-entities (reads its output) - see
+    # entity_sentiment()'s docstring in run_batch.py.
     # Relevance is decided AFTER clustering/summarizing now, not before -
     # see tag_relevance()'s docstring in run_batch.py.
     assert run_batch.start_run(tmp_path) == 0
@@ -107,6 +121,7 @@ def test_pipeline_end_to_end(monkeypatch, tmp_path):
     assert run_batch.tag_relevance(run_id) == 0
     assert run_batch.sentiment_article(run_id) == 0
     assert run_batch.article_entities(run_id) == 0
+    assert run_batch.entity_sentiment(run_id) == 0
     assert run_batch.finalize(run_id) == 0
 
     touched = ops.get_touched_story_ids(run_id)
@@ -123,10 +138,18 @@ def test_pipeline_end_to_end(monkeypatch, tmp_path):
             run_row = cur.fetchone()
             cur.execute("SELECT summary_text FROM story_summaries WHERE story_id = %s", (story_id,))
             summary_row = cur.fetchone()
-            cur.execute("SELECT sentiment_label FROM article_sentiment WHERE article_id = %s", (articles[0]["id"],))
+            cur.execute(
+                "SELECT sentiment_label, emotion_label FROM article_sentiment WHERE article_id = %s",
+                (articles[0]["id"],),
+            )
             sentiment_row = cur.fetchone()
             cur.execute("SELECT count(*) AS n FROM article_entities WHERE article_id = %s", (articles[0]["id"],))
             article_entity_count = cur.fetchone()["n"]
+            cur.execute(
+                "SELECT entity_text, sentiment_label FROM article_entity_sentiment WHERE article_id = %s",
+                (articles[0]["id"],),
+            )
+            entity_sentiment_rows = cur.fetchall()
 
     assert run_row["status"] == "success"
     assert run_row["articles_matched"] == 1
@@ -134,7 +157,11 @@ def test_pipeline_end_to_end(monkeypatch, tmp_path):
     assert run_row["summaries_generated"] == 1
     assert summary_row["summary_text"] == "A stubbed summary of the story."
     assert sentiment_row["sentiment_label"] == "POSITIVE"
+    assert sentiment_row["emotion_label"] == "joy"
     assert article_entity_count == 1
+    assert len(entity_sentiment_rows) == 1
+    assert entity_sentiment_rows[0]["entity_text"] == "Joe Biden"
+    assert entity_sentiment_rows[0]["sentiment_label"] == "Positive"
 
 
 def test_tag_relevance_retry_does_not_duplicate_matches(monkeypatch, tmp_path):
