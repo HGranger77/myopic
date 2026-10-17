@@ -12,6 +12,7 @@ _TABLES = [
     "stories",
     "watchlist_matches",
     "article_entities",
+    "article_entity_sentiment",
     "articles",
     "scrape_runs",
     "watchlist_aliases",

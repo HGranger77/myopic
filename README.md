@@ -51,15 +51,16 @@ flowchart TD
     CS["cluster-stories<br/><i>cosine similarity over embeddings,<br/>no model of its own</i>"]
     SS["summarize-story<br/><b>distilbart-cnn-12-6</b>"]
     TR["tag-relevance<br/><b>bart-large-mnli</b><br/><i>zero-shot vs. the watchlist</i>"]
-    SA["sentiment-article<br/><b>distilbert-sst-2</b><br/><i>relevant stories only</i>"]
+    SA["sentiment-article<br/><b>distilbert-sst-2</b><br/><b>emotion-distilroberta</b><br/><i>relevant stories only</i>"]
     ART["article-entities<br/><b>spaCy en_core_web_sm</b><br/><i>relevant stories only</i>"]
+    ES["entity-sentiment<br/><b>deberta-v3-absa</b><br/><i>per significant entity</i>"]
     FIN[finalize]
 
     SR --> D1 & D2 & D3 & D4 & D5
     D1 & D2 & D3 & D4 & D5 --> FAB
     FAB --> TA --> EA --> CS --> SS --> TR
     TR --> SA --> FIN
-    TR --> ART --> FIN
+    TR --> ART --> ES --> FIN
 ```
 
 `discover` runs as one task per configured source, in parallel, each writing straight into the
@@ -69,11 +70,13 @@ shared `fetch-article-bodies` worklist. Every other labeled node names the actua
 
 Relevance is decided **after** clustering and summarizing, not before: every fetched article
 gets embedded and clustered regardless of watchlist relevance, and every story gets a summary.
-Only then does `tag-relevance` check that short summary against the watchlist, and the two
-downstream stages - sentiment and per-article entities - scope themselves back down to just the
-stories that matched, since there's no reason to spend a CPU-bound model pass on a story nobody's
-watching for. See [DEV.md](DEV.md) for the full rationale and how to run and deploy this
-yourself.
+Only then does `tag-relevance` check that short summary against the watchlist, and the
+downstream stages - sentiment/emotion, per-article entities, and per-entity sentiment - scope
+themselves back down to just the stories that matched, since there's no reason to spend a
+CPU-bound model pass on a story nobody's watching for. `entity-sentiment` runs after
+`article-entities` specifically (not just after `tag-relevance` like the others), since it scores
+each entity `article-entities` already found, rather than running its own extraction. See
+[DEV.md](DEV.md) for the full rationale and how to run and deploy this yourself.
 
 ## The story viewer
 
