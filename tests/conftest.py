@@ -6,12 +6,15 @@ load_dotenv()
 from database import get_connection, init_db  # noqa: E402
 
 _TABLES = [
+    "story_locations",
+    "geocode_cache",
     "article_sentiment",
     "story_summaries",
     "story_articles",
     "stories",
     "watchlist_matches",
     "article_entities",
+    "article_entity_sentiment",
     "articles",
     "scrape_runs",
     "watchlist_aliases",

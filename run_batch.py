@@ -14,9 +14,9 @@ tag-relevance classify that short summary against the watchlist and stamp
 the verdict onto the story's member articles. This moved deliberately - see
 tag_relevance()'s docstring below for why checking the raw article text
 directly was both slower and less accurate than checking the summary.
-sentiment-article and article-entities, the two stages after tag-relevance,
-are scoped back down to the relevant subset, since there's no point paying
-for either on stories nobody's watching for.
+sentiment-article, article-entities, and entity-sentiment - the stages after
+tag-relevance - are scoped back down to the relevant subset, since there's
+no point paying for any of them on stories nobody's watching for.
 """
 import argparse
 import asyncio
@@ -291,11 +291,15 @@ def tag_relevance(run_id: int) -> int:
         summary_text = ops.get_story_summary_text(story_id)
         member_articles = ops.get_story_articles(story_id)
 
-        # Fluff stories (gossip, listicles, lifestyle) are never relevant,
-        # even if they match a watchlist topic - no point paying for
-        # sentiment/NER on them. Checked first so we skip the watchlist call.
-        fluff = bool(summary_text) and is_fluff(summary_text)
-        matches = [] if fluff or not watchlist or not summary_text else check_relevance(summary_text, watchlist)
+        matches = check_relevance(summary_text, watchlist) if watchlist and summary_text else []
+        # Fluff (gossip, listicles, lifestyle) only matters for a story that
+        # would otherwise be shown, so it's checked AFTER the watchlist match
+        # - most stories match nothing and never pay for the extra pass. A
+        # fluff story's matches are dropped so it never reaches the page, and
+        # it is never relevant, so sentiment/NER skip it.
+        fluff = bool(matches) and is_fluff(summary_text)
+        if fluff:
+            matches = []
         is_relevant = len(matches) > 0
 
         for article in member_articles:
@@ -309,7 +313,12 @@ def tag_relevance(run_id: int) -> int:
             ops.set_article_fluff(article["id"], fluff)
 
         relevant += int(is_relevant)
-        verdict = "FLUFF" if fluff else "RELEVANT (" + ", ".join(m["canonical_name"] for m in matches) + ")" if matches else "not relevant"
+        if fluff:
+            verdict = "FLUFF (filtered)"
+        elif matches:
+            verdict = "RELEVANT (" + ", ".join(m["canonical_name"] for m in matches) + ")"
+        else:
+            verdict = "not relevant"
         print(f"[tag-relevance] {i}/{len(touched)} story {story_id} "
               f"({len(member_articles)} articles): {verdict}")
 
@@ -329,6 +338,8 @@ def sentiment_article(run_id: int) -> int:
     # --run-id uniformly (see this file's module docstring) - removing it
     # here would mean this is the one stage whose Argo task has no
     # parameters, for no real benefit.
+    from nlp.emotion import MODEL_NAME as EMOTION_MODEL_NAME
+    from nlp.emotion import analyze as analyze_emotion
     from nlp.sentiment import MODEL_NAME as SENTIMENT_MODEL_NAME
     from nlp.sentiment import analyze as analyze_sentiment
 
@@ -338,9 +349,14 @@ def sentiment_article(run_id: int) -> int:
         try:
             article = ops.get_article(row["article_id"])
             label, score = analyze_sentiment(article["body_text"])
-            ops.upsert_article_sentiment(article["id"], row["story_id"], label, score, SENTIMENT_MODEL_NAME)
+            emotion_label, emotion_score = analyze_emotion(article["body_text"])
+            ops.upsert_article_sentiment(
+                article["id"], row["story_id"], label, score, SENTIMENT_MODEL_NAME,
+                emotion_label, emotion_score, EMOTION_MODEL_NAME,
+            )
             done += 1
-            print(f"[sentiment-article] {i}/{len(todo)} article {article['id']}: {label} ({score:.3f})")
+            print(f"[sentiment-article] {i}/{len(todo)} article {article['id']}: "
+                  f"{label} ({score:.3f}), {emotion_label} ({emotion_score:.3f})")
         except Exception as exc:  # noqa: BLE001
             print(f"[sentiment-article] {i}/{len(todo)} failed for article "
                   f"{row['article_id']}: {exc}", file=sys.stderr)
@@ -377,6 +393,146 @@ def article_entities(run_id: int) -> int:
                   f"{row['article_id']}: {exc}", file=sys.stderr)
 
     print(f"[article-entities] processed {done}/{len(todo)} articles")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# geolocate-story (one task, one ML model + a geocoder, loop over relevant
+# stories still missing a location)
+#
+# Decides where each relevant story happened. Five steps per story, only
+# ONE of which is a model (full rationale in nlp/placeselect.py):
+#
+#   1. candidates   NER places from article-entities          (database read)
+#   2. name screen  drop places that are really person names  (counting)
+#   3. geocode      OpenStreetMap Nominatim, cached           (HTTP, no ML)
+#   4. NLI scoring  facebook/bart-large-mnli                  (ML)
+#   5. choice       best score -> more specific child -> min-confidence cutoff
+#
+# Runs after article-entities (needs its places). Always writes a
+# story_locations row (lat/lon NULL if no place cleared the cutoff) so the
+# story isn't retried every run. A network failure is NOT recorded - the
+# story stays on the worklist for the next run.
+# ---------------------------------------------------------------------------
+
+def _story_premise(story_id: int) -> str:
+    articles = ops.get_story_articles(story_id)
+    return f"{articles[0]['headline']}. {ops.get_story_summary_text(story_id) or ''}"
+
+
+def _locate(story_id: int):
+    """Runs the five steps. Returns (candidate, nli_score, runners_up) or
+    None; runners_up is [(place, nli_score), ...] for the log."""
+    from nlp import placeselect
+    from nlp.geocode import geocode, plausible_place
+
+    # 1. candidates (NER, from article-entities) + 2. name screen
+    candidates = placeselect.screen_candidates(
+        [c for c in ops.get_story_place_candidates(story_id) if plausible_place(c["text"])]
+    )
+
+    # 3. geocode - keep only candidates that resolve to a real place
+    located = []
+    for c in candidates:
+        geo = ops.get_cached_geocode(c["key"])
+        if geo is None:
+            geo = geocode(c["key"])
+            ops.set_cached_geocode(c["key"], geo)
+            geo = geo or {}
+        if geo.get("lat") is not None:
+            located.append({**c, "geo": geo})
+        if len(located) == placeselect.MAX_CANDIDATES:
+            break
+    if not located:
+        return None
+
+    # 4. NLI scoring - the only model call
+    scores = placeselect.nli_scores(_story_premise(story_id), [c["text"] for c in located])
+
+    # 5. choice
+    chosen = placeselect.choose_place(located, scores)
+    if chosen is None:
+        return None
+    runners_up = sorted(((t, s) for t, s in scores.items() if t != chosen[0]["text"]), key=lambda x: -x[1])[:2]
+    return chosen[0], chosen[1], runners_up
+
+
+def geolocate_story(run_id: int) -> int:
+    # run_id unused - gap-based worklist, see sentiment_article()'s comment.
+    from nlp.placeselect import PRECISE_MIN_RANK
+
+    todo = ops.get_relevant_stories_missing_location()
+    located = 0
+    for i, story_id in enumerate(todo, start=1):
+        try:
+            found = _locate(story_id)
+            if found is None:
+                ops.upsert_story_location(story_id, None, None, None)
+                print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: no place cleared the cutoff")
+                continue
+            place, score, runners_up = found
+            geo = place["geo"]
+            precise = geo["place_rank"] >= PRECISE_MIN_RANK
+            ops.upsert_story_location(
+                story_id, place["text"], geo["lat"], geo["lon"], precise,
+                None if precise else geo["radius_km"], score,
+            )
+            located += 1
+            others = ", ".join(f"{t} {s:.2f}" for t, s in runners_up)
+            print(f"[geolocate-story] {i}/{len(todo)} story {story_id}: {place['text']} "
+                  f"(nli {score:.2f}{'' if precise else ', approximate'}; next: {others})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[geolocate-story] {i}/{len(todo)} failed for story {story_id}: {exc}", file=sys.stderr)
+
+    print(f"[geolocate-story] located {located}/{len(todo)} stories")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# entity-sentiment (one task, ABSA model, loop over relevant articles still
+# missing it)
+#
+# Must run strictly after article-entities - its worklist is independently
+# gap-based (is_relevant + not yet checked, same pattern as every other
+# stage here), but it reads ops.get_article_entities() for its entity list,
+# which is only populated once article-entities has processed that article.
+# The Argo DAG enforces this with an explicit dependency
+# (article-entities -> entity-sentiment); don't run this stage any other
+# way, or an article entity-sentiment reaches before article-entities does
+# would look like it has zero significant entities and never get a second
+# chance (entity_sentiment_checked_at gets stamped regardless).
+# ---------------------------------------------------------------------------
+
+def entity_sentiment(run_id: int) -> int:
+    # run_id unused - see sentiment_article()'s comment above for why.
+    from nlp.entity_sentiment import MODEL_NAME as ENTITY_SENTIMENT_MODEL_NAME
+    from nlp.entity_sentiment import analyze as analyze_entity_sentiment
+
+    todo = ops.get_relevant_articles_missing_entity_sentiment()
+    done = 0
+    for i, row in enumerate(todo, start=1):
+        try:
+            article = ops.get_article(row["article_id"])
+            entities = ops.get_article_entities(article["id"])
+            scored = []
+            for category, texts in entities.items():
+                for entity_text in texts:
+                    label, score = analyze_entity_sentiment(article["body_text"], entity_text)
+                    scored.append({
+                        "entity_text": entity_text,
+                        "entity_category": category,
+                        "sentiment_label": label,
+                        "sentiment_score": score,
+                    })
+            ops.delete_article_entity_sentiment(article["id"])
+            ops.insert_article_entity_sentiment(article["id"], scored, ENTITY_SENTIMENT_MODEL_NAME)
+            done += 1
+            print(f"[entity-sentiment] {i}/{len(todo)} article {article['id']}: {len(scored)} entities scored")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[entity-sentiment] {i}/{len(todo)} failed for article "
+                  f"{row['article_id']}: {exc}", file=sys.stderr)
+
+    print(f"[entity-sentiment] processed {done}/{len(todo)} articles")
     return 0
 
 
@@ -428,7 +584,10 @@ def _parse_args() -> argparse.Namespace:
     for name in ["fetch-article-bodies", "translate-article", "embed-article"]:
         sub.add_parser(name)
 
-    for name in ["cluster-stories", "summarize-story", "tag-relevance", "sentiment-article", "article-entities", "finalize"]:
+    for name in [
+        "cluster-stories", "summarize-story", "tag-relevance", "sentiment-article",
+        "article-entities", "geolocate-story", "entity-sentiment", "finalize",
+    ]:
         p = sub.add_parser(name)
         p.add_argument("--run-id", type=int, required=True)
 
@@ -460,6 +619,10 @@ def main() -> int:
             return sentiment_article(args.run_id)
         if args.command == "article-entities":
             return article_entities(args.run_id)
+        if args.command == "geolocate-story":
+            return geolocate_story(args.run_id)
+        if args.command == "entity-sentiment":
+            return entity_sentiment(args.run_id)
         if args.command == "finalize":
             return finalize(args.run_id)
         raise AssertionError(f"unhandled command: {args.command}")

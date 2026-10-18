@@ -656,20 +656,36 @@ def get_story_summary_text(story_id: int) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def upsert_article_sentiment(
-    article_id: int, story_id: int, label: str, score: float, model_name: str
+    article_id: int,
+    story_id: int,
+    label: str,
+    score: float,
+    model_name: str,
+    emotion_label: Optional[str] = None,
+    emotion_score: Optional[float] = None,
+    emotion_model_name: Optional[str] = None,
 ) -> None:
+    """emotion_* is optional - sentiment_article() always passes it (both
+    classifiers run in the same stage), but callers that only care about
+    sentiment (tests, one-off backfills) aren't forced to thread emotion
+    data through for no reason."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO article_sentiment (article_id, story_id, sentiment_label, sentiment_score, model_name)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO article_sentiment
+                    (article_id, story_id, sentiment_label, sentiment_score, model_name,
+                     emotion_label, emotion_score, emotion_model_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (article_id) DO UPDATE
                     SET sentiment_label = EXCLUDED.sentiment_label,
                         sentiment_score = EXCLUDED.sentiment_score,
-                        model_name = EXCLUDED.model_name
+                        model_name = EXCLUDED.model_name,
+                        emotion_label = EXCLUDED.emotion_label,
+                        emotion_score = EXCLUDED.emotion_score,
+                        emotion_model_name = EXCLUDED.emotion_model_name
                 """,
-                (article_id, story_id, label, score, model_name),
+                (article_id, story_id, label, score, model_name, emotion_label, emotion_score, emotion_model_name),
             )
 
 
@@ -750,6 +766,90 @@ def get_article_entities(article_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# article_entity_sentiment - aspect-based sentiment per significant entity
+# (see nlp/entity_sentiment.py), one-shot per article like article_entities
+# ---------------------------------------------------------------------------
+
+def get_relevant_articles_missing_entity_sentiment() -> list[dict]:
+    """Every watchlist-relevant article entity-sentiment hasn't checked yet.
+    Gap-based on entity_sentiment_checked_at, not on whether
+    article_entity_sentiment rows exist - same reasoning as
+    get_relevant_articles_missing_entities(), since an article with zero
+    significant entities would otherwise look permanently unprocessed.
+    Returns [{article_id}, ...]."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT a.id AS article_id FROM articles a "
+                "WHERE a.is_relevant = TRUE AND a.entity_sentiment_checked_at IS NULL"
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def delete_article_entity_sentiment(article_id: int) -> None:
+    """Makes entity-sentiment safe to retry without duplicating rows - same
+    reasoning as delete_article_entities()."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM article_entity_sentiment WHERE article_id = %s", (article_id,))
+
+
+def insert_article_entity_sentiment(article_id: int, scored_entities: Iterable[dict], model_name: str) -> None:
+    """scored_entities: iterable of {entity_text, entity_category, sentiment_label,
+    sentiment_score} - entity_category is one of people/organizations/locations
+    (get_article_entities()'s bucket names). Always stamps
+    articles.entity_sentiment_checked_at, even when scored_entities is empty -
+    see get_relevant_articles_missing_entity_sentiment()'s docstring for why."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for ent in scored_entities:
+                cur.execute(
+                    """
+                    INSERT INTO article_entity_sentiment
+                        (article_id, entity_text, entity_category, sentiment_label, sentiment_score, model_name)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (article_id, entity_category, entity_text) DO UPDATE
+                        SET sentiment_label = EXCLUDED.sentiment_label,
+                            sentiment_score = EXCLUDED.sentiment_score,
+                            model_name = EXCLUDED.model_name
+                    """,
+                    (
+                        article_id,
+                        ent["entity_text"],
+                        ent["entity_category"],
+                        ent["sentiment_label"],
+                        ent["sentiment_score"],
+                        model_name,
+                    ),
+                )
+            cur.execute("UPDATE articles SET entity_sentiment_checked_at = now() WHERE id = %s", (article_id,))
+
+
+def get_article_entity_sentiment(article_id: int) -> dict:
+    """{(category, entity_text_lower): {"label": ..., "score": ...}} for one
+    article - a lookup the /stories page uses to annotate each entity tag
+    with its own sentiment, keyed case-insensitively since display text
+    elsewhere (get_article_entities) is matched the same way."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT entity_text, entity_category, sentiment_label, sentiment_score
+                FROM article_entity_sentiment WHERE article_id = %s
+                """,
+                (article_id,),
+            )
+            rows = cur.fetchall()
+    return {
+        (row["entity_category"], row["entity_text"].lower()): {
+            "label": row["sentiment_label"],
+            "score": row["sentiment_score"],
+        }
+        for row in rows
+    }
+
+
+# ---------------------------------------------------------------------------
 # story viewer (web page)
 # ---------------------------------------------------------------------------
 
@@ -796,14 +896,17 @@ def get_recent_stories_with_summaries(
                     s.id AS story_id, s.updated_at, ss.summary_text,
                     array_agg(DISTINCT a.source) AS sources,
                     array_agg(DISTINCT we.canonical_name) AS matched_entities,
+                    sl.location_text, (sl.lat IS NOT NULL) AS located,
                     count(*) OVER() AS total_count
                 FROM stories s
                 JOIN story_summaries ss ON ss.story_id = s.id
+                LEFT JOIN story_locations sl ON sl.story_id = s.id
                 JOIN story_articles sa ON sa.story_id = s.id
                 JOIN articles a ON a.id = sa.article_id
                 LEFT JOIN watchlist_matches wm ON wm.article_id = a.id
                 LEFT JOIN watchlist_entities we ON we.id = wm.watchlist_entity_id
-                WHERE (%(topic)s IS NULL OR EXISTS (
+                WHERE a.is_fluff IS NOT TRUE
+                AND (%(topic)s IS NULL OR EXISTS (
                     SELECT 1 FROM story_articles sa2
                     JOIN watchlist_matches wm2 ON wm2.article_id = sa2.article_id
                     JOIN watchlist_entities we2 ON we2.id = wm2.watchlist_entity_id
@@ -815,7 +918,7 @@ def get_recent_stories_with_summaries(
                     JOIN articles a3 ON a3.id = sa3.article_id
                     WHERE sa3.story_id = s.id AND a3.headline ILIKE '%%' || %(q)s || '%%'
                 ))
-                GROUP BY s.id, s.updated_at, ss.summary_text
+                GROUP BY s.id, s.updated_at, ss.summary_text, sl.location_text, sl.lat
                 HAVING count(wm.id) > 0
                 ORDER BY s.updated_at DESC
                 LIMIT %(limit)s OFFSET %(offset)s
@@ -847,7 +950,8 @@ def get_story_dates(topic: Optional[str] = None, q: Optional[str] = None) -> lis
                 JOIN articles a ON a.id = sa.article_id
                 JOIN watchlist_matches wm ON wm.article_id = a.id
                 JOIN watchlist_entities we ON we.id = wm.watchlist_entity_id
-                WHERE (%(topic)s IS NULL OR we.canonical_name = %(topic)s)
+                WHERE a.is_fluff IS NOT TRUE
+                AND (%(topic)s IS NULL OR we.canonical_name = %(topic)s)
                 AND (%(q)s IS NULL OR ss.summary_text ILIKE '%%' || %(q)s || '%%' OR EXISTS (
                     SELECT 1 FROM story_articles sa3
                     JOIN articles a3 ON a3.id = sa3.article_id
@@ -886,7 +990,8 @@ def get_topic_story_counts(date: Optional[str] = None, q: Optional[str] = None) 
                 SELECT we.canonical_name, count(DISTINCT ss.story_id) AS story_count
                 FROM watchlist_entities we
                 LEFT JOIN watchlist_matches wm ON wm.watchlist_entity_id = we.id
-                LEFT JOIN story_articles sa ON sa.article_id = wm.article_id
+                LEFT JOIN articles fa ON fa.id = wm.article_id AND fa.is_fluff IS NOT TRUE
+                LEFT JOIN story_articles sa ON sa.article_id = fa.id
                 LEFT JOIN stories s ON s.id = sa.story_id
                     AND (%(date)s IS NULL OR s.updated_at::date = %(date)s::date)
                 LEFT JOIN story_summaries ss ON ss.story_id = s.id
@@ -909,7 +1014,8 @@ def get_story_source_articles(story_id: int) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT a.id, a.source, a.url, a.headline, asent.sentiment_label, asent.sentiment_score
+                SELECT a.id, a.source, a.url, a.headline,
+                    asent.sentiment_label, asent.sentiment_score, asent.emotion_label, asent.emotion_score
                 FROM articles a
                 JOIN story_articles sa ON sa.article_id = a.id
                 LEFT JOIN article_sentiment asent ON asent.article_id = a.id
@@ -919,3 +1025,181 @@ def get_story_source_articles(story_id: int) -> list[dict]:
                 (story_id,),
             )
             return [dict(row) for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# geolocation / map view
+# ---------------------------------------------------------------------------
+
+def get_relevant_stories_missing_location() -> list[int]:
+    """Relevant stories geolocate-story hasn't checked yet - its worklist.
+    Gap-based (a story_locations row, even an empty one, marks it done)."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT sa.story_id
+                FROM story_articles sa
+                JOIN articles a ON a.id = sa.article_id
+                WHERE a.is_relevant = TRUE
+                AND NOT EXISTS (SELECT 1 FROM story_locations sl WHERE sl.story_id = sa.story_id)
+                """
+            )
+            return [row["story_id"] for row in cur.fetchall()]
+
+
+def get_story_place_candidates(story_id: int) -> list[dict]:
+    """Every place (GPE/LOC/FAC) NER found in a story's articles, with the
+    counts nlp.placeselect needs. No model runs here. Returns
+    [{text, key, significant_articles, mentions, person_mentions,
+    org_mentions, headline_hits}, ...] ordered by significance + headline hits, strongest
+    first.
+
+    significant_articles: how many member articles pass
+    nlp.matching.filter_significant_entities for this place (see
+    get_article_entities). person_mentions / org_mentions: how many PERSON /
+    ORG entities in the story contain this place's text as a word - only
+    for one-word names ("Kabila" in "Joseph Kabila", "Sydney" in "Sydney
+    Swans"), 0 otherwise. nlp.placeselect drops on the first and only
+    penalises on the second."""
+    import re
+
+    from nlp.placeselect import place_key
+
+    articles = get_story_articles(story_id)
+    ids = [a["id"] for a in articles]
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT entity_text, entity_label FROM article_entities WHERE article_id = ANY(%s)",
+                (ids,),
+            )
+            rows = cur.fetchall()
+    places: dict[str, dict] = {}
+    person_words: dict[str, int] = {}
+    org_words: dict[str, int] = {}
+    for row in rows:
+        text, label = row["entity_text"], row["entity_label"]
+        if label in ("GPE", "LOC", "FAC"):
+            p = places.setdefault(place_key(text), {"text": text, "mentions": 0, "significant_articles": 0})
+            p["mentions"] += 1
+        if label in ("PERSON", "ORG"):
+            bucket = person_words if label == "PERSON" else org_words
+            for word in re.findall(r"[a-z]{3,}", text.lower()):
+                bucket[word] = bucket.get(word, 0) + 1
+    for article in articles:
+        for text in get_article_entities(article["id"])["locations"]:
+            p = places.setdefault(place_key(text), {"text": text, "mentions": 0, "significant_articles": 0})
+            p["significant_articles"] += 1
+    headlines = " ".join(a["headline"] for a in articles).lower()
+    out = []
+    for key, p in places.items():
+        words = re.findall(r"[a-z]{3,}", key)
+        out.append({
+            "key": key, "text": p["text"],
+            "significant_articles": p["significant_articles"], "mentions": p["mentions"],
+            "person_mentions": person_words.get(words[0], 0) if len(words) == 1 else 0,
+            "org_mentions": org_words.get(words[0], 0) if len(words) == 1 else 0,
+            "headline_hits": len(re.findall(r"(?<![a-z])" + re.escape(key) + r"(?![a-z])", headlines)),
+        })
+    # only places the pipeline's own significance filter or the headline vouches for
+    out = [c for c in out if c["significant_articles"] > 0 or c["headline_hits"] > 0]
+    out.sort(key=lambda c: -(c["significant_articles"] + c["headline_hits"]))
+    return out
+
+
+def get_cached_geocode(query: str) -> Optional[dict]:
+    """None if never looked up; otherwise {lat, lon, display_name}, with
+    lat/lon None for a cached "not found"."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT lat, lon, display_name, place_rank, radius_km FROM geocode_cache WHERE query = %s", (query.lower(),)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def set_cached_geocode(query: str, result: Optional[dict]) -> None:
+    result = result or {}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO geocode_cache (query, lat, lon, display_name, place_rank, radius_km)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (query) DO UPDATE
+                SET lat = EXCLUDED.lat, lon = EXCLUDED.lon, display_name = EXCLUDED.display_name,
+                    place_rank = EXCLUDED.place_rank, radius_km = EXCLUDED.radius_km
+                """,
+                (query.lower(), result.get("lat"), result.get("lon"), result.get("display_name"),
+                 result.get("place_rank"), result.get("radius_km")),
+            )
+
+
+def upsert_story_location(
+    story_id: int, location_text: Optional[str], lat: Optional[float], lon: Optional[float],
+    precise: Optional[bool] = None, radius_km: Optional[float] = None,
+    confidence: Optional[float] = None,
+) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO story_locations (story_id, location_text, lat, lon, precise, radius_km, confidence)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (story_id) DO UPDATE
+                SET location_text = EXCLUDED.location_text, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                    precise = EXCLUDED.precise, radius_km = EXCLUDED.radius_km,
+                    confidence = EXCLUDED.confidence
+                """,
+                (story_id, location_text, lat, lon, precise, radius_km, confidence),
+            )
+
+
+def get_map_stories(date: Optional[str] = None) -> list[dict]:
+    """Located, relevant, summarized stories (optionally last updated on one
+    'YYYY-MM-DD' day) for the /map page. [{story_id, summary_text,
+    location_text, lat, lon, updated_at, topics, headline}, ...] - headline
+    is the story's earliest-discovered article's."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.id AS story_id, s.updated_at, ss.summary_text,
+                       sl.location_text, sl.lat, sl.lon, sl.precise, sl.radius_km,
+                       (SELECT a.headline FROM story_articles sa
+                        JOIN articles a ON a.id = sa.article_id
+                        WHERE sa.story_id = s.id ORDER BY a.discovered_at LIMIT 1) AS headline,
+                       ARRAY(SELECT DISTINCT we.canonical_name FROM story_articles sa
+                             JOIN watchlist_matches wm ON wm.article_id = sa.article_id
+                             JOIN watchlist_entities we ON we.id = wm.watchlist_entity_id
+                             WHERE sa.story_id = s.id) AS topics
+                FROM stories s
+                JOIN story_summaries ss ON ss.story_id = s.id
+                JOIN story_locations sl ON sl.story_id = s.id
+                WHERE sl.lat IS NOT NULL AND sl.lon IS NOT NULL
+                AND EXISTS (SELECT 1 FROM story_articles sa
+                            JOIN watchlist_matches wm ON wm.article_id = sa.article_id
+                            JOIN articles fa ON fa.id = sa.article_id AND fa.is_fluff IS NOT TRUE
+                            WHERE sa.story_id = s.id)
+                AND (%(date)s IS NULL OR s.updated_at::date = %(date)s::date)
+                ORDER BY s.updated_at DESC
+                """,
+                {"date": date},
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_latest_map_date():
+    """Most recent day with a mappable story, or None."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT max(s.updated_at::date) AS day FROM stories s
+                JOIN story_locations sl ON sl.story_id = s.id
+                WHERE sl.lat IS NOT NULL
+                """
+            )
+            return cur.fetchone()["day"]

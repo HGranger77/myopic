@@ -1,3 +1,5 @@
+import pytest
+
 from database import operations as ops
 
 
@@ -143,6 +145,64 @@ def test_entities_worklist_does_not_reprocess_zero_entity_articles_forever():
 
     ops.insert_article_entities(article_id, [])  # ran NER, found nothing
     assert ops.get_relevant_articles_missing_entities() == []
+
+
+def test_entity_sentiment_worklist_does_not_reprocess_zero_entity_articles_forever():
+    # same fix as entities_checked_at (see the test above), for
+    # entity_sentiment_checked_at - an article with zero significant
+    # entities must still drop out of entity-sentiment's worklist.
+    run_id = ops.create_scrape_run()
+    article_id = _make_fetched_article("https://example.com/zero-entity-sentiment", run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, run_id)
+    ops.set_article_relevance(article_id, True)
+    assert ops.get_relevant_articles_missing_entity_sentiment() == [{"article_id": article_id}]
+
+    ops.insert_article_entity_sentiment(article_id, [], "test-absa-model")
+    assert ops.get_relevant_articles_missing_entity_sentiment() == []
+
+
+def test_entity_sentiment_insert_and_lookup_round_trip():
+    run_id = ops.create_scrape_run()
+    article_id = _make_fetched_article("https://example.com/entity-sentiment-roundtrip", run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, run_id)
+    ops.set_article_relevance(article_id, True)
+
+    ops.insert_article_entity_sentiment(
+        article_id,
+        [
+            {"entity_text": "Jane Smith", "entity_category": "people", "sentiment_label": "Positive", "sentiment_score": 0.91},
+            {"entity_text": "Acme Corp", "entity_category": "organizations", "sentiment_label": "Negative", "sentiment_score": 0.88},
+        ],
+        "test-absa-model",
+    )
+
+    lookup = ops.get_article_entity_sentiment(article_id)
+    assert lookup[("people", "jane smith")] == {"label": "Positive", "score": pytest.approx(0.91)}
+    assert lookup[("organizations", "acme corp")] == {"label": "Negative", "score": pytest.approx(0.88)}
+    assert ops.get_relevant_articles_missing_entity_sentiment() == []
+
+
+def test_entity_sentiment_retry_does_not_duplicate_or_error_on_unique_constraint():
+    run_id = ops.create_scrape_run()
+    article_id = _make_fetched_article("https://example.com/entity-sentiment-retry", run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, run_id)
+    ops.set_article_relevance(article_id, True)
+
+    entry = [{"entity_text": "Jane Smith", "entity_category": "people", "sentiment_label": "Positive", "sentiment_score": 0.9}]
+    ops.insert_article_entity_sentiment(article_id, entry, "test-absa-model")
+    # simulate a retried task: delete-then-reinsert, same as entity_sentiment() in run_batch.py
+    ops.delete_article_entity_sentiment(article_id)
+    ops.insert_article_entity_sentiment(article_id, entry, "test-absa-model")
+
+    with ops.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM article_entity_sentiment WHERE article_id = %s", (article_id,)
+            )
+            assert cur.fetchone()["n"] == 1
 
 
 def _seed_relevant_story(entity_id: int, url: str, summary: str, headline: str = "Headline") -> int:
@@ -338,6 +398,38 @@ def test_article_sentiment_is_one_shot_per_article():
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) AS n FROM article_sentiment WHERE article_id = %s", (article_id,))
             assert cur.fetchone()["n"] == 1
+
+
+def test_article_sentiment_stores_emotion_alongside_sentiment():
+    run_id = ops.create_scrape_run()
+    article_id = _make_fetched_article("https://example.com/emotion-story", run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, run_id)
+
+    ops.upsert_article_sentiment(
+        article_id, story_id, "NEGATIVE", 0.9, "test-sentiment-model",
+        emotion_label="fear", emotion_score=0.76, emotion_model_name="test-emotion-model",
+    )
+
+    source_articles = ops.get_story_source_articles(story_id)
+    assert len(source_articles) == 1
+    assert source_articles[0]["sentiment_label"] == "NEGATIVE"
+    assert source_articles[0]["emotion_label"] == "fear"
+    assert source_articles[0]["emotion_score"] == pytest.approx(0.76)
+
+
+def test_article_sentiment_emotion_fields_default_to_none():
+    # existing callers (and old rows) that don't pass emotion data must not
+    # break - the columns are nullable and optional
+    run_id = ops.create_scrape_run()
+    article_id = _make_fetched_article("https://example.com/no-emotion-story", run_id)
+    story_id = ops.create_story()
+    ops.add_article_to_story(story_id, article_id, run_id)
+
+    ops.upsert_article_sentiment(article_id, story_id, "POSITIVE", 0.9, "test-model")
+
+    source_articles = ops.get_story_source_articles(story_id)
+    assert source_articles[0]["emotion_label"] is None
 
 
 def _entity(text, label, start):

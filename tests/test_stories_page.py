@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from database import operations as ops
@@ -6,7 +7,9 @@ from main import app
 client = TestClient(app)
 
 
-def _seed_matched_story(sentiment_label: str = "POSITIVE", entity_name: str = "Joe Biden", url: str = None):
+def _seed_matched_story(
+    sentiment_label: str = "POSITIVE", entity_name: str = "Joe Biden", url: str = None, emotion_label: str = None
+):
     entity = ops.create_watchlist_entity(entity_name)
     run_id = ops.create_scrape_run()
     article_id, _ = ops.upsert_article(
@@ -22,7 +25,11 @@ def _seed_matched_story(sentiment_label: str = "POSITIVE", entity_name: str = "J
     story_id = ops.create_story()
     ops.add_article_to_story(story_id, article_id, run_id)
     ops.upsert_story_summary(story_id, "Biden announced a new policy.", "test-model")
-    ops.upsert_article_sentiment(article_id, story_id, sentiment_label, 0.9, "test-model")
+    ops.upsert_article_sentiment(
+        article_id, story_id, sentiment_label, 0.9, "test-model",
+        emotion_label=emotion_label, emotion_score=0.8 if emotion_label else None,
+        emotion_model_name="test-emotion-model" if emotion_label else None,
+    )
     return story_id, article_id
 
 
@@ -36,6 +43,22 @@ def test_stories_page_lists_matched_summarized_story():
     assert "Joe Biden" in resp.text  # matched entity badge
     assert "nine_com_au" in resp.text  # source tag
     assert "POSITIVE" in resp.text  # sentiment badge
+
+
+@pytest.mark.skip(reason="emotion badge deliberately disabled in templates/stories.html (see plan.md) - re-enable with the template block")
+def test_stories_page_shows_emotion_badge_alongside_sentiment():
+    _seed_matched_story(sentiment_label="NEGATIVE", emotion_label="fear")
+    resp = client.get("/stories")
+    assert resp.status_code == 200
+    assert '<span class="sentiment negative">NEGATIVE</span>' in resp.text
+    assert '<span class="emotion fear">fear</span>' in resp.text
+
+
+def test_stories_page_omits_emotion_badge_when_no_emotion_data():
+    _seed_matched_story()  # no emotion_label passed - simulates a pre-emotion-feature row
+    resp = client.get("/stories")
+    assert resp.status_code == 200
+    assert 'class="emotion' not in resp.text
 
 
 def test_stories_page_excludes_summarized_but_unmatched_story():
@@ -73,6 +96,44 @@ def test_stories_page_shows_per_article_entities_by_category():
     assert '<span class="entity-tag org">White House</span>' in resp.text
     assert '<span class="entity-tag location">Washington</span>' in resp.text
     assert "yesterday" not in resp.text  # DATE isn't a shown category
+
+
+def test_stories_page_shows_entity_sentiment_dot_when_scored():
+    _, article_id = _seed_matched_story()
+    ops.insert_article_entities(article_id, [
+        {"text": "Joe Biden", "normalized_text": "joe biden", "label": "PERSON", "start_char": 0, "end_char": 9},
+        {"text": "White House", "normalized_text": "white house", "label": "ORG", "start_char": 20, "end_char": 31},
+    ])
+    ops.insert_article_entity_sentiment(
+        article_id,
+        [
+            {"entity_text": "Joe Biden", "entity_category": "people", "sentiment_label": "Positive", "sentiment_score": 0.9},
+        ],
+        "test-absa-model",
+    )
+
+    resp = client.get("/stories")
+    assert resp.status_code == 200
+    # scored entity gets a sentiment dot ahead of its text, inside the same tag
+    assert '<span class="entity-tag person"><span class="entity-sentiment-dot positive" title="Positive"></span>Joe Biden</span>' in resp.text
+    # unscored entity (no article_entity_sentiment row) renders exactly as before - no dot
+    assert '<span class="entity-tag org">White House</span>' in resp.text
+
+
+def test_stories_page_entity_without_sentiment_has_no_dot():
+    _, article_id = _seed_matched_story()
+    ops.insert_article_entities(article_id, [
+        {"text": "Joe Biden", "normalized_text": "joe biden", "label": "PERSON", "start_char": 0, "end_char": 9},
+    ])
+    # no insert_article_entity_sentiment call - simulates entity-sentiment
+    # not having reached this article yet
+    resp = client.get("/stories")
+    assert resp.status_code == 200
+    assert '<span class="entity-tag person">Joe Biden</span>' in resp.text
+    # "entity-sentiment-dot" itself appears in the page's <style> block
+    # (the CSS class definition) regardless - check no actual dot element
+    # was rendered, not that the bare class name string is absent
+    assert '<span class="entity-sentiment-dot' not in resp.text
 
 
 def test_stories_page_matched_entity_badge_is_capitalized():
@@ -350,3 +411,58 @@ def test_stories_page_topic_counts_reflect_active_search():
 
     resp_filtered = client.get("/stories?q=grand+final")
     assert ">AFL (1)<" in resp_filtered.text
+
+
+def test_map_page_shows_located_story():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    resp = client.get("/map")
+    assert resp.status_code == 200
+    assert "Biden announces policy" in resp.text
+    assert "Washington" in resp.text
+    assert "38.9" in resp.text
+
+
+def test_map_page_excludes_story_without_coordinates():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, None, None, None)
+    resp = client.get("/map")
+    assert resp.status_code == 200
+    assert "Biden announces policy" not in resp.text
+    assert "No located stories" in resp.text
+
+
+def test_stories_page_links_located_story_to_map_and_has_tabs():
+    story_id, _ = _seed_matched_story()
+    unlocated_id, _ = _seed_matched_story(entity_name="Other", url="https://www.nine.com.au/x.html")
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get("/stories").text
+    assert f"/map?date=" in html and f"story={story_id}" in html
+    assert f"story={unlocated_id}" not in html  # no pin icon without a location
+    assert 'href="/map"' in html and 'aria-current="page">Articles' in html
+
+
+def test_map_page_has_tabs_and_focus_story():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get(f"/map?story={story_id}").text
+    assert 'aria-current="page">Map' in html
+    assert f"const focusStory = {story_id};" in html
+
+
+def test_stories_page_story_param_lands_on_its_page_and_highlights_it():
+    ids = []
+    for i in range(22):  # PAGE_SIZE is 20, so the oldest story lands on page 2
+        story_id, _ = _seed_matched_story(url=f"https://www.nine.com.au/s{i}.html", entity_name=f"E{i}")
+        ids.append(story_id)
+    oldest = ids[0]
+    html = client.get(f"/stories?story={oldest}").text
+    assert f'id="story-{oldest}"' in html
+    assert 'class="story focused"' in html
+
+
+def test_map_popup_links_back_to_story_page():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get("/map").text
+    assert "/stories?date=" in html and "#story-" in html and "View full story" in html
