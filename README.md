@@ -53,6 +53,7 @@ flowchart TD
     TR["tag-relevance<br/><b>bart-large-mnli</b><br/><i>zero-shot vs. the watchlist</i>"]
     SA["sentiment-article<br/><b>distilbert-sst-2</b><br/><b>emotion-distilroberta</b><br/><i>relevant stories only</i>"]
     ART["article-entities<br/><b>spaCy en_core_web_sm</b><br/><i>relevant stories only</i>"]
+    GS["geolocate-story<br/><b>bart-large-mnli</b> (place scoring)<br/><i>+ Nominatim geocoder, relevant stories only</i>"]
     ES["entity-sentiment<br/><b>deberta-v3-absa</b><br/><i>per significant entity</i>"]
     FIN[finalize]
 
@@ -60,23 +61,41 @@ flowchart TD
     D1 & D2 & D3 & D4 & D5 --> FAB
     FAB --> TA --> EA --> CS --> SS --> TR
     TR --> SA --> FIN
-    TR --> ART --> ES --> FIN
+    TR --> ART --> ES --> GS --> FIN
 ```
 
 `discover` runs as one task per configured source, in parallel, each writing straight into the
-shared `fetch-article-bodies` worklist. Every other labeled node names the actual model it loads;
-`cluster-stories` has none of its own - it just does cosine-similarity matching over the vectors
-`embed-article` already produced.
+shared `fetch-article-bodies` worklist. Each node names the model it loads, if any. `geolocate-story`
+runs after `entity-sentiment` only so two model pods never overlap on the 6GB node; it reads
+the places `article-entities` found.
+
+### What each stage does
+
+| Stage | Processing | Model |
+|---|---|---|
+| `discover` | Scrape each source's front pages for headlines | none |
+| `fetch-article-bodies` | Download and extract article text | none |
+| `translate-article` | Translate non-English articles to English | Helsinki-NLP/opus-mt-zh-en |
+| `embed-article` | One embedding vector per article | all-MiniLM-L6-v2 |
+| `cluster-stories` | Group articles into stories by cosine similarity | none (pgvector) |
+| `summarize-story` | Short summary of each story | distilbart-cnn-12-6 |
+| `tag-relevance` | Zero-shot match of the summary against the watchlist | bart-large-mnli |
+| `sentiment-article` | Per-article sentiment and emotion | distilbert-sst-2, emotion-distilroberta |
+| `article-entities` | Named entities (people, orgs, places) per article | spaCy en_core_web_sm |
+| `entity-sentiment` | Sentiment toward each significant entity | deberta-v3-absa |
+| `geolocate-story` | Choose where the story happened (below) | bart-large-mnli (+ Nominatim, not ML) |
+| `finalize` | Run accounting | none |
 
 Relevance is decided **after** clustering and summarizing, not before: every fetched article
 gets embedded and clustered regardless of watchlist relevance, and every story gets a summary.
 Only then does `tag-relevance` check that short summary against the watchlist, and the
-downstream stages - sentiment/emotion, per-article entities, and per-entity sentiment - scope
-themselves back down to just the stories that matched, since there's no reason to spend a
-CPU-bound model pass on a story nobody's watching for. `entity-sentiment` runs after
-`article-entities` specifically (not just after `tag-relevance` like the others), since it scores
-each entity `article-entities` already found, rather than running its own extraction. See
-[DEV.md](DEV.md) for the full rationale and how to run and deploy this yourself.
+downstream stages - sentiment/emotion, per-article entities, per-entity sentiment, and
+geolocation - scope themselves back down to just the stories that matched, since there's no
+reason to spend a CPU-bound model pass on a story nobody's watching for. `entity-sentiment` and
+`geolocate-story` run after `article-entities` specifically (not just after `tag-relevance` like
+the others), since they build on the entities `article-entities` already found rather than
+running their own extraction. See [DEV.md](DEV.md) for the full rationale and how to run and
+deploy this yourself.
 
 ## The story viewer
 
@@ -86,6 +105,22 @@ Each story shows a lead headline and date, the watchlist topics it matched, a lo
 summary, and then every source that covered it - with that source's own sentiment reading and
 the people, organizations, and locations its own NER pass found. Stories can be filtered by
 topic, with a live count of how many stories currently match each one.
+
+## The story map
+
+`/map` shows a day's stories as icons at the place each one happened (`/map?date=YYYY-MM-DD`);
+nearby icons cluster, and each popup links back to the story. `geolocate-story` picks the place in
+five steps, only one of which is a model (see `nlp/placeselect.py`):
+
+1. **Candidates** - the places `article-entities` found (a database read).
+2. **Name screen** - drop a place whose text is mostly a *person's* name in the same story ("Kabila"); a place that also appears inside *organisation* names ("Sydney" in "Sydney Swans") is only penalised in step 5, not dropped.
+3. **Geocode** - OpenStreetMap Nominatim, cached in `geocode_cache`; anything that isn't a real place is dropped. Override the endpoint with `MYOPIC_GEOCODER_URL`.
+4. **Score (ML)** - `bart-large-mnli` rates how well "This event happened in *place*." follows from the story's headline and summary.
+5. **Choice** - best score (less the organisation penalty); a more specific place inside it (Sydney in Australia) wins if nearly as good; no pin if the best score is under 0.4.
+
+A specific place is a solid pin; a country, region or continent is a faded pin with a dashed circle for
+the approximate area. Stories with no place above the cutoff don't appear. The accuracy audit and
+experiments behind these choices are in [docs/geolocation-audit.md](docs/geolocation-audit.md).
 
 ## Documentation
 

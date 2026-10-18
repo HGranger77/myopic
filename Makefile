@@ -2,7 +2,7 @@ VENV := venv-myopic/bin
 ARGO_VERSION := v4.1.4
 
 .PHONY: install up down build batch check expose expose-stories expose-argo expose-grafana \
-	cluster-up cluster-images cluster-secrets cluster-postgres cluster-api cluster-argo \
+	cluster-up cluster-images cluster-prune-images cluster-secrets cluster-postgres cluster-api cluster-argo \
 	cluster-workflow cluster-monitoring cluster-deploy cluster-status cluster-down
 
 install:
@@ -40,6 +40,15 @@ cluster-up:
 cluster-images:
 	minikube image build -t myopic-api:latest -f Dockerfile.api .
 	minikube image build -t myopic-batch:latest -f Dockerfile.batch .
+	$(MAKE) cluster-prune-images
+
+# Each rebuild leaves the previous ~4GB myopic-batch image behind as an untagged
+# layer. They pile up inside minikube's disk, which lives in the WSL vhdx on
+# the host's C: drive; when C: fills, Windows halts the whole WSL VM.
+cluster-prune-images:
+	# Untagged only: `crictl rmi --prune` would also drop tagged images no pod is
+	# running right now (the batch image, argoexec).
+	minikube ssh -- "sudo crictl images | awk '\$$1==\"<none>\"{print \$$3}' | xargs -r sudo crictl rmi"
 
 cluster-secrets:
 	set -a; . ./.env; set +a; \

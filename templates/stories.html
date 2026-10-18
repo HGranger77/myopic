@@ -101,6 +101,7 @@
     padding: 1.25rem 1.4rem;
     margin-bottom: 1.1rem;
   }
+  .story.focused { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
   .story-header {
     display: flex;
     justify-content: space-between;
@@ -395,6 +396,13 @@
   .pagination .page-indicator {
     color: var(--muted);
   }
+  .tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--border); margin-bottom: 1.25rem; }
+  .tab { padding: .5rem 1rem; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .map-link { display: inline-flex; align-items: center; gap: .25rem; color: var(--accent); text-decoration: none; font-size: .8rem; }
+  .map-link:hover { text-decoration: underline; }
+  .story-meta { display: flex; align-items: center; gap: .75rem; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -403,6 +411,7 @@
     <h1>Reportable stories</h1>
     <p>Topics of interest, clustered across sources and summarized locally.</p>
   </header>
+  {% with active="articles", tab_date=selected_date %}{% include "_tabs.html" %}{% endwith %}
 
   <div class="page-layout">
   <div class="main-content">
@@ -431,12 +440,20 @@
 
   {% if stories %}
     {% for story in stories %}
-    <article class="story">
+    <article class="story{% if story.story_id == focus_story %} focused" id="story-{{ story.story_id }}{% endif %}">
       <div class="story-header">
         <h2 class="story-title">
           {{ story.source_articles[0].headline if story.source_articles else "Untitled story" }}
         </h2>
-        <span class="story-date">{{ story.updated_at.strftime('%d %b %Y, %H:%M') }}</span>
+        <span class="story-meta">
+          {% if story.map_href %}
+          <a class="map-link" href="{{ story.map_href }}" title="Show on map: {{ story.location_text }}" aria-label="Show {{ story.location_text }} on the map">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>
+            {{ story.location_text }}
+          </a>
+          {% endif %}
+          <span class="story-date">{{ story.updated_at.strftime('%d %b %Y, %H:%M') }}</span>
+        </span>
       </div>
       <div class="tags">
         {% for entity in story.matched_entities %}

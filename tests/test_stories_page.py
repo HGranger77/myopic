@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from database import operations as ops
@@ -44,6 +45,7 @@ def test_stories_page_lists_matched_summarized_story():
     assert "POSITIVE" in resp.text  # sentiment badge
 
 
+@pytest.mark.skip(reason="emotion badge deliberately disabled in templates/stories.html (see plan.md) - re-enable with the template block")
 def test_stories_page_shows_emotion_badge_alongside_sentiment():
     _seed_matched_story(sentiment_label="NEGATIVE", emotion_label="fear")
     resp = client.get("/stories")
@@ -409,3 +411,58 @@ def test_stories_page_topic_counts_reflect_active_search():
 
     resp_filtered = client.get("/stories?q=grand+final")
     assert ">AFL (1)<" in resp_filtered.text
+
+
+def test_map_page_shows_located_story():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    resp = client.get("/map")
+    assert resp.status_code == 200
+    assert "Biden announces policy" in resp.text
+    assert "Washington" in resp.text
+    assert "38.9" in resp.text
+
+
+def test_map_page_excludes_story_without_coordinates():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, None, None, None)
+    resp = client.get("/map")
+    assert resp.status_code == 200
+    assert "Biden announces policy" not in resp.text
+    assert "No located stories" in resp.text
+
+
+def test_stories_page_links_located_story_to_map_and_has_tabs():
+    story_id, _ = _seed_matched_story()
+    unlocated_id, _ = _seed_matched_story(entity_name="Other", url="https://www.nine.com.au/x.html")
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get("/stories").text
+    assert f"/map?date=" in html and f"story={story_id}" in html
+    assert f"story={unlocated_id}" not in html  # no pin icon without a location
+    assert 'href="/map"' in html and 'aria-current="page">Articles' in html
+
+
+def test_map_page_has_tabs_and_focus_story():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get(f"/map?story={story_id}").text
+    assert 'aria-current="page">Map' in html
+    assert f"const focusStory = {story_id};" in html
+
+
+def test_stories_page_story_param_lands_on_its_page_and_highlights_it():
+    ids = []
+    for i in range(22):  # PAGE_SIZE is 20, so the oldest story lands on page 2
+        story_id, _ = _seed_matched_story(url=f"https://www.nine.com.au/s{i}.html", entity_name=f"E{i}")
+        ids.append(story_id)
+    oldest = ids[0]
+    html = client.get(f"/stories?story={oldest}").text
+    assert f'id="story-{oldest}"' in html
+    assert 'class="story focused"' in html
+
+
+def test_map_popup_links_back_to_story_page():
+    story_id, _ = _seed_matched_story()
+    ops.upsert_story_location(story_id, "Washington", 38.9, -77.0, True)
+    html = client.get("/map").text
+    assert "/stories?date=" in html and "#story-" in html and "View full story" in html

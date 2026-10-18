@@ -225,6 +225,23 @@ with CronWorkflow(
         resources=Resources(cpu_request="200m", cpu_limit="500m", memory_request="512Mi", memory_limit="768Mi"),
     )
 
+    geolocate_story = Container(
+        name="geolocate-story",
+        image=IMAGE,
+        image_pull_policy="Never",
+        command=["python", "run_batch.py", "geolocate-story", "--run-id", "{{inputs.parameters.run-id}}"],
+        inputs=[Parameter(name="run-id")],
+        env=ENV,
+        env_from=ENV_FROM,
+        # Loads facebook/bart-large-mnli (the same model, same ~1.7GB peak, as
+        # tag-relevance - see nlp/placeselect.py) plus throttled geocoder HTTP
+        # calls. cpu_limit=4 must match nlp/tagging.py's _N_THREADS, which it
+        # shares. Depends on entity-sentiment, not just article-entities, so
+        # it never overlaps with that stage's own model: together with the
+        # (small) sentiment-article it stays well under the 6GB node.
+        resources=Resources(cpu_request="2", cpu_limit="4", memory_request="2Gi", memory_limit="3Gi"),
+    )
+
     entity_sentiment = Container(
         name="entity-sentiment",
         image=IMAGE,
@@ -284,10 +301,12 @@ with CronWorkflow(
         ae = article_entities(name="article-entities", arguments=_run_id_arg(), dependencies=["tag-relevance"])
         es = entity_sentiment(name="entity-sentiment", arguments=_run_id_arg(), dependencies=["article-entities"])
 
+        gs = geolocate_story(name="geolocate-story", arguments=_run_id_arg(), dependencies=["entity-sentiment"])
+
         fin = finalize(
             name="finalize",
             arguments=_run_id_arg(),
-            dependencies=["sentiment-article", "entity-sentiment"],
+            dependencies=["sentiment-article", "geolocate-story"],
         )
 
 
