@@ -484,8 +484,8 @@ def find_similar_story(
                        AVG(a.embedding) <=> %(emb)s::vector AS centroid
                 FROM story_articles sa
                 JOIN articles a ON a.id = sa.article_id
-                WHERE a.discovered_at BETWEEN %(t)s - make_interval(hours => %(h)s)
-                                          AND %(t)s + make_interval(hours => %(h)s)
+                WHERE a.discovered_at BETWEEN %(t)s - (%(h)s * interval '1 hour')
+                                          AND %(t)s + (%(h)s * interval '1 hour')
                 GROUP BY sa.story_id
                 HAVING MIN(a.embedding <=> %(emb)s::vector) <= %(max_nearest)s
                    AND AVG(a.embedding) <=> %(emb)s::vector <= %(max_centroid)s

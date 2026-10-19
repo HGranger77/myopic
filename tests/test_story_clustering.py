@@ -81,3 +81,49 @@ def test_embedding_text_is_headline_plus_short_lead():
     assert text.startswith("Headline. First line. Second paragraph.")
     assert len(text) == len("Headline. ") + run_batch.EMBED_LEAD_CHARS
     assert run_batch.embedding_text("Headline", None) == "Headline"
+
+
+def _story_articles(n, body_len=3000):
+    return [
+        {"source": f"s{i}", "headline": f"headline {i}", "body_text": f"fact{i} " + "x" * body_len,
+         "discovered_at": T0 + timedelta(hours=i)}
+        for i in range(n)
+    ]
+
+
+def test_combined_story_text_gives_every_article_a_share():
+    import run_batch
+
+    text = run_batch._combined_story_text(_story_articles(3))
+    assert len(text) <= run_batch.SUMMARY_INPUT_CHARS + 2 * len("\n\n")
+    for i in range(3):  # the old plain concatenation cut the last article off entirely
+        assert f"fact{i}" in text
+    assert text.index("fact2") < text.index("fact0")  # newest first
+
+
+def test_combined_story_text_short_articles_donate_unused_share():
+    import run_batch
+
+    arts = _story_articles(3, body_len=3000)
+    arts[0]["body_text"] = "tiny"
+    text = run_batch._combined_story_text(arts)
+    assert "tiny" in text
+    assert len(text) > run_batch.SUMMARY_INPUT_CHARS * 0.95
+
+
+def test_combined_story_text_drops_oldest_when_too_many():
+    import run_batch
+
+    arts = _story_articles(60, body_len=500)
+    text = run_batch._combined_story_text(arts)
+    assert "headline 59" in text and "headline 0\n" not in text
+    assert text.count("[s") <= run_batch.SUMMARY_INPUT_CHARS // run_batch.MIN_ARTICLE_CHARS
+
+
+def test_window_accepts_float_hours():
+    # run_batch passes MYOPIC_STORY_WINDOW_HOURS as a float
+    run_id = ops.create_scrape_run()
+    story = ops.create_story()
+    _add_to_story(story, _vec(1, 0), T0, run_id, "u1")
+    assert ops.find_similar_story(_vec(1, 0), T0, 24.0, NEAREST, CENTROID) == story
+    assert ops.find_similar_story(_vec(1, 0), T0 + timedelta(hours=13), 12.5, NEAREST, CENTROID) is None
