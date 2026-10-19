@@ -10,6 +10,7 @@ under both rule sets and prints how they differ. Writes nothing.
 Reads the DB named by the usual POSTGRES_* env vars / .env.
 """
 import argparse
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -56,7 +57,7 @@ def cluster_old(articles: list[Article], window_days: float = 14, max_distance: 
 
 
 def cluster_new(
-    articles: list[Article], window_hours: float = 24, max_nearest: float = 0.25, max_centroid: float = 0.35
+    articles: list[Article], window_hours: float = 24, max_nearest: float = 0.35, max_centroid: float = 0.45
 ) -> dict[int, int]:
     """Current rule (mirrors ops.find_similar_story): only members within
     +/- window_hours count; story needs nearest <= max_nearest AND
@@ -120,6 +121,26 @@ def _to_array(embedding) -> np.ndarray:
     return np.asarray(raw, dtype=float)
 
 
+def _parse_ts(text: str) -> datetime:
+    # Postgres text timestamps ("...:52.26341+00") - Python 3.10's fromisoformat
+    # wants 6 fractional digits and a "+HH:MM" offset
+    m = re.fullmatch(r"(.*?)(?:\.(\d+))?([+-]\d\d)(?::?(\d\d))?", text)
+    base, frac, hh, mm = m.groups()
+    return datetime.fromisoformat(f"{base}.{(frac or '0').ljust(6, '0')}{hh}:{mm or '00'}")
+
+
+def load_articles_csv(path: str) -> list[Article]:
+    """Columns: id, source, headline, discovered_at, embedding (as '[0.1,...]')."""
+    import csv
+    import json
+
+    with open(path, newline="") as f:
+        return [
+            Article(int(r[0]), r[1], r[2], _parse_ts(r[3]), np.asarray(json.loads(r[4]), dtype=float))
+            for r in csv.reader(f)
+        ]
+
+
 def load_articles() -> list[Article]:
     from dotenv import load_dotenv
 
@@ -141,12 +162,13 @@ def load_articles() -> list[Article]:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pair", nargs=2, type=int, metavar=("ID_A", "ID_B"), help="print distance between two articles")
+    p.add_argument("--csv", help="read articles from a CSV export instead of the DB")
     p.add_argument("--hours", type=float, default=24)
-    p.add_argument("--nearest", type=float, default=0.25)
-    p.add_argument("--centroid", type=float, default=0.35)
+    p.add_argument("--nearest", type=float, default=0.35)
+    p.add_argument("--centroid", type=float, default=0.45)
     args = p.parse_args()
 
-    articles = load_articles()
+    articles = load_articles_csv(args.csv) if args.csv else load_articles()
     by_id = {a.id: a for a in articles}
     if args.pair:
         a, b = (by_id.get(i) for i in args.pair)

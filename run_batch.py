@@ -46,8 +46,8 @@ CONFIG_PATH = Path(__file__).parent / "config" / "sources.yaml"
 # (nearest member, and centroid of the in-window members) - see
 # ops.find_similar_story.
 STORY_WINDOW_HOURS = float(os.environ.get("MYOPIC_STORY_WINDOW_HOURS", "24"))
-STORY_MAX_NEAREST_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_NEAREST_DISTANCE", "0.25"))
-STORY_MAX_CENTROID_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_CENTROID_DISTANCE", "0.35"))
+STORY_MAX_NEAREST_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_NEAREST_DISTANCE", "0.35"))
+STORY_MAX_CENTROID_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_CENTROID_DISTANCE", "0.45"))
 FETCH_CONCURRENCY = int(os.environ.get("MYOPIC_FETCH_CONCURRENCY", "8"))
 MAX_STORY_TEXT_CHARS = 8000  # keeps a many-source story's combined text bounded
 # translate-article is autoregressive (see nlp/translate.py) - at ~60s/article
