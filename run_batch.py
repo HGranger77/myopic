@@ -46,8 +46,8 @@ CONFIG_PATH = Path(__file__).parent / "config" / "sources.yaml"
 # (nearest member, and centroid of the in-window members) - see
 # ops.find_similar_story.
 STORY_WINDOW_HOURS = float(os.environ.get("MYOPIC_STORY_WINDOW_HOURS", "24"))
-STORY_MAX_NEAREST_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_NEAREST_DISTANCE", "0.35"))
-STORY_MAX_CENTROID_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_CENTROID_DISTANCE", "0.45"))
+STORY_MAX_NEAREST_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_NEAREST_DISTANCE", "0.5"))
+STORY_MAX_CENTROID_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_CENTROID_DISTANCE", "0.55"))
 FETCH_CONCURRENCY = int(os.environ.get("MYOPIC_FETCH_CONCURRENCY", "8"))
 MAX_STORY_TEXT_CHARS = 8000  # keeps a many-source story's combined text bounded
 # translate-article is autoregressive (see nlp/translate.py) - at ~60s/article
@@ -202,6 +202,19 @@ def translate_article() -> int:
 # embed-article (one task, embedding model, pure CPU loop)
 # ---------------------------------------------------------------------------
 
+# Embedding the whole body let a shared dateline/topic word ("Saudi") pull
+# unrelated stories together: on 1,462 real articles a football story sat as
+# close (0.26) to a Houthi-missile story as two genuine reports of one attack
+# were to each other (0.27). Headline + lead gave a clear gap (same-event
+# pairs <= 0.38, different-event >= 0.59), so only that is embedded.
+EMBED_LEAD_CHARS = 300
+
+
+def embedding_text(headline: str, body_text: str | None) -> str:
+    lead = " ".join((body_text or "").split())[:EMBED_LEAD_CHARS]
+    return f"{headline}. {lead}" if lead else headline
+
+
 def embed_article() -> int:
     from nlp.embedding import embed
 
@@ -211,7 +224,7 @@ def embed_article() -> int:
     # incident this prevents.
     to_embed = ops.get_articles_needing_embedding(_non_english_modules())
     for i, article in enumerate(to_embed, start=1):
-        vector = embed(article["body_text"])
+        vector = embed(embedding_text(article["headline"], article["body_text"]))
         ops.set_article_embedding(article["id"], vector)
         print(f"[embed-article] {i}/{len(to_embed)} article {article['id']} embedded")
     print(f"[embed-article] embedded {len(to_embed)} articles")

@@ -71,3 +71,13 @@ def test_picks_best_of_several_stories():
     _add_to_story(far, _vec(1, 0.5), T0, run_id, "far")
     _add_to_story(near, _vec(1, 0.05), T0, run_id, "near")
     assert _find(_vec(1, 0), T0) == near
+
+
+def test_embedding_text_is_headline_plus_short_lead():
+    import run_batch
+
+    body = "First   line.\n\nSecond paragraph. " + "x" * 1000
+    text = run_batch.embedding_text("Headline", body)
+    assert text.startswith("Headline. First line. Second paragraph.")
+    assert len(text) == len("Headline. ") + run_batch.EMBED_LEAD_CHARS
+    assert run_batch.embedding_text("Headline", None) == "Headline"

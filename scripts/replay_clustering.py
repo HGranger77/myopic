@@ -57,7 +57,7 @@ def cluster_old(articles: list[Article], window_days: float = 14, max_distance: 
 
 
 def cluster_new(
-    articles: list[Article], window_hours: float = 24, max_nearest: float = 0.35, max_centroid: float = 0.45
+    articles: list[Article], window_hours: float = 24, max_nearest: float = 0.5, max_centroid: float = 0.55
 ) -> dict[int, int]:
     """Current rule (mirrors ops.find_similar_story): only members within
     +/- window_hours count; story needs nearest <= max_nearest AND
@@ -164,8 +164,8 @@ def main() -> int:
     p.add_argument("--pair", nargs=2, type=int, metavar=("ID_A", "ID_B"), help="print distance between two articles")
     p.add_argument("--csv", help="read articles from a CSV export instead of the DB")
     p.add_argument("--hours", type=float, default=24)
-    p.add_argument("--nearest", type=float, default=0.35)
-    p.add_argument("--centroid", type=float, default=0.45)
+    p.add_argument("--nearest", type=float, default=0.5)
+    p.add_argument("--centroid", type=float, default=0.55)
     args = p.parse_args()
 
     articles = load_articles_csv(args.csv) if args.csv else load_articles()
