@@ -87,7 +87,7 @@ def _patch_models(monkeypatch):
     monkeypatch.setattr(run_batch, "load_sources", lambda: FAKE_SOURCES)
     monkeypatch.setattr(ner_module, "extract_entities", _fake_extract_entities)
     monkeypatch.setattr(tagging_module, "check_relevance", _fake_check_relevance)
-    monkeypatch.setattr(embedding_module, "embed", _fake_embed)
+    monkeypatch.setattr(embedding_module, "embed_batch", lambda texts: [_fake_embed(t) for t in texts])
     monkeypatch.setattr(summarize_module, "summarize", _fake_summarize)
     monkeypatch.setattr(sentiment_module, "analyze", _fake_analyze_sentiment)
     monkeypatch.setattr(emotion_module, "analyze", _fake_analyze_emotion)

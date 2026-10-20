@@ -240,15 +240,15 @@ def embedding_text(headline: str, body_text: str | None) -> str:
 
 
 def embed_article() -> int:
-    from nlp.embedding import embed
+    from nlp.embedding import embed_batch
 
     # Must exclude non-English articles translate-article hasn't reached yet
     # (TRANSLATE_MAX_ARTICLES caps it to a handful per run) - see
     # get_articles_needing_embedding()'s docstring for the garbled-story
     # incident this prevents.
     to_embed = ops.get_articles_needing_embedding(_non_english_modules())
-    for i, article in enumerate(to_embed, start=1):
-        vector = embed(embedding_text(article["headline"], article["body_text"]))
+    vectors = embed_batch([embedding_text(a["headline"], a["body_text"]) for a in to_embed])
+    for i, (article, vector) in enumerate(zip(to_embed, vectors), start=1):
         ops.set_article_embedding(article["id"], vector)
         print(f"[embed-article] {i}/{len(to_embed)} article {article['id']} embedded")
     print(f"[embed-article] embedded {len(to_embed)} articles")

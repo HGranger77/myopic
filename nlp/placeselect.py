@@ -79,6 +79,7 @@ def nli_scores(premise: str, places: list[str]) -> dict[str, float]:
     result = _get_classifier()(
         premise[:_MAX_PREMISE_CHARS], candidate_labels=places,
         hypothesis_template=HYPOTHESIS, multi_label=True,
+        batch_size=max(1, len(places)),  # one forward pass over all candidates (~1.2x vs 1)
     )
     return dict(zip(result["labels"], result["scores"]))
 
