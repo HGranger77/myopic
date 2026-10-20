@@ -456,28 +456,49 @@ def get_articles_needing_clustering() -> list[dict]:
 
 
 def find_similar_story(
-    embedding: list[float], window_days: int, max_distance: float
+    embedding: list[float],
+    discovered_at,
+    window_hours: float,
+    max_nearest_distance: float,
+    max_centroid_distance: float,
 ) -> Optional[int]:
-    """Nearest existing story (by its most similar member article) within the
-    rolling window, if under max_distance. None means "start a new story"."""
+    """Best existing story for an article, or None for "start a new story".
+
+    Only member articles discovered within +/- window_hours of
+    `discovered_at` are considered, so stories never link across more than
+    that gap. A story qualifies only if BOTH hold:
+      - its nearest in-window member is within max_nearest_distance (the
+        article closely matches at least one report), AND
+      - the centroid of its in-window members is within
+        max_centroid_distance (the article fits the story as a whole, not
+        just one outlier member - this stops a story drifting from, say,
+        Gulf conflict into Saudi football through a chain of loose links).
+    Qualifying stories are ranked by the sum of the two distances.
+    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT sa.story_id, a.embedding <=> %s::vector AS distance
+                SELECT sa.story_id,
+                       MIN(a.embedding <=> %(emb)s::vector) AS nearest,
+                       AVG(a.embedding) <=> %(emb)s::vector AS centroid
                 FROM story_articles sa
                 JOIN articles a ON a.id = sa.article_id
-                JOIN stories s ON s.id = sa.story_id
-                WHERE s.updated_at > now() - (%s || ' days')::interval
-                ORDER BY distance ASC
+                WHERE a.discovered_at BETWEEN %(t)s - (%(h)s * interval '1 hour')
+                                          AND %(t)s + (%(h)s * interval '1 hour')
+                GROUP BY sa.story_id
+                HAVING MIN(a.embedding <=> %(emb)s::vector) <= %(max_nearest)s
+                   AND AVG(a.embedding) <=> %(emb)s::vector <= %(max_centroid)s
+                ORDER BY MIN(a.embedding <=> %(emb)s::vector) + (AVG(a.embedding) <=> %(emb)s::vector) ASC
                 LIMIT 1
                 """,
-                (embedding, window_days),
+                {
+                    "emb": embedding, "t": discovered_at, "h": window_hours,
+                    "max_nearest": max_nearest_distance, "max_centroid": max_centroid_distance,
+                },
             )
             row = cur.fetchone()
-            if row is None or row["distance"] > max_distance:
-                return None
-            return row["story_id"]
+            return row["story_id"] if row else None
 
 
 def create_story() -> int:

@@ -41,10 +41,16 @@ from scraper.registry import get_source
 
 CONFIG_PATH = Path(__file__).parent / "config" / "sources.yaml"
 
-STORY_WINDOW_DAYS = int(os.environ.get("MYOPIC_STORY_WINDOW_DAYS", "14"))
-STORY_MAX_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_DISTANCE", "0.3"))
+# Articles only join a story whose members were discovered within this many
+# hours either side of them; a story must also pass BOTH distance checks
+# (nearest member, and centroid of the in-window members) - see
+# ops.find_similar_story.
+STORY_WINDOW_HOURS = float(os.environ.get("MYOPIC_STORY_WINDOW_HOURS", "24"))
+STORY_MAX_NEAREST_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_NEAREST_DISTANCE", "0.5"))
+STORY_MAX_CENTROID_DISTANCE = float(os.environ.get("MYOPIC_STORY_MAX_CENTROID_DISTANCE", "0.55"))
 FETCH_CONCURRENCY = int(os.environ.get("MYOPIC_FETCH_CONCURRENCY", "8"))
-MAX_STORY_TEXT_CHARS = 8000  # keeps a many-source story's combined text bounded
+SUMMARY_INPUT_CHARS = 4000  # just under what the summarizer reads (1024 tokens); see _combined_story_text
+MIN_ARTICLE_CHARS = 200
 # translate-article is autoregressive (see nlp/translate.py) - at ~60s/article
 # this caps a single run's cost rather than translating a whole backlog (e.g.
 # a source's full homepage on first discovery) in one go. Untranslated
@@ -57,9 +63,32 @@ def load_sources() -> dict:
     return yaml.safe_load(CONFIG_PATH.read_text())
 
 
-def _combined_story_text(articles: list[dict]) -> str:
-    parts = [f"[{a['source']}] {a['headline']}\n{a['body_text']}" for a in articles]
-    return "\n\n".join(parts)[:MAX_STORY_TEXT_CHARS]
+def _combined_story_text(articles: list[dict], newest_first: bool = True) -> str:
+    """Summarizer input that gives EVERY article a share of the budget.
+
+    The summarizer only reads ~1024 tokens (about 4,500 chars), so plain
+    concatenation silently dropped whichever articles came last. Real case:
+    a 3-article story whose newest article carried the person of interest
+    who'd been stood down - 1,627 tokens combined, so it never reached the
+    model and the summary missed it entirely. Instead each article gets an
+    equal share of SUMMARY_INPUT_CHARS (short articles hand their unused
+    share to longer ones), taking the start of each since that's where a
+    news article puts its facts. Newest first, because the summarizer leans
+    toward the start of its input and later developments are the news; if
+    there are too many articles for MIN_ARTICLE_CHARS each, the oldest are
+    dropped.
+    """
+    ordered = sorted(articles, key=lambda a: a["discovered_at"], reverse=newest_first)
+    ordered = ordered[: SUMMARY_INPUT_CHARS // MIN_ARTICLE_CHARS]
+    texts = [f"[{a['source']}] {a['headline']}\n{a['body_text'] or ''}" for a in ordered]
+
+    # water-filling: shortest first, each gets min(its length, equal share of what's left)
+    budget = SUMMARY_INPUT_CHARS
+    limits = {}
+    for i in sorted(range(len(texts)), key=lambda i: len(texts[i])):
+        limits[i] = min(len(texts[i]), budget // (len(texts) - len(limits)))
+        budget -= limits[i]
+    return "\n\n".join(texts[i][: limits[i]] for i in range(len(texts)))
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +226,19 @@ def translate_article() -> int:
 # embed-article (one task, embedding model, pure CPU loop)
 # ---------------------------------------------------------------------------
 
+# Embedding the whole body let a shared dateline/topic word ("Saudi") pull
+# unrelated stories together: on 1,462 real articles a football story sat as
+# close (0.26) to a Houthi-missile story as two genuine reports of one attack
+# were to each other (0.27). Headline + lead gave a clear gap (same-event
+# pairs <= 0.38, different-event >= 0.59), so only that is embedded.
+EMBED_LEAD_CHARS = 300
+
+
+def embedding_text(headline: str, body_text: str | None) -> str:
+    lead = " ".join((body_text or "").split())[:EMBED_LEAD_CHARS]
+    return f"{headline}. {lead}" if lead else headline
+
+
 def embed_article() -> int:
     from nlp.embedding import embed
 
@@ -206,7 +248,7 @@ def embed_article() -> int:
     # incident this prevents.
     to_embed = ops.get_articles_needing_embedding(_non_english_modules())
     for i, article in enumerate(to_embed, start=1):
-        vector = embed(article["body_text"])
+        vector = embed(embedding_text(article["headline"], article["body_text"]))
         ops.set_article_embedding(article["id"], vector)
         print(f"[embed-article] {i}/{len(to_embed)} article {article['id']} embedded")
     print(f"[embed-article] embedded {len(to_embed)} articles")
@@ -222,7 +264,10 @@ def cluster_stories(run_id: int) -> int:
     new_stories = 0
     joined_stories = 0
     for i, article in enumerate(to_cluster, start=1):
-        story_id = ops.find_similar_story(article["embedding"], STORY_WINDOW_DAYS, STORY_MAX_DISTANCE)
+        story_id = ops.find_similar_story(
+            article["embedding"], article["discovered_at"], STORY_WINDOW_HOURS,
+            STORY_MAX_NEAREST_DISTANCE, STORY_MAX_CENTROID_DISTANCE,
+        )
         if story_id is None:
             story_id = ops.create_story()
             new_stories += 1

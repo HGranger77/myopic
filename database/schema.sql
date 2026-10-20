@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS articles (
     original_body_text TEXT,
     -- filled in by tag-relevance: does this article's story match a topic of interest at all?
     is_relevant        BOOLEAN,
-    -- filled in by embed-article; all-MiniLM-L6-v2 (see nlp/embedding.py)
+    -- filled in by embed-article from headline + first 300 chars of body
+    -- (see run_batch.embedding_text); all-MiniLM-L6-v2 (see nlp/embedding.py)
     embedding          vector(384),
     -- Stamped by article-entities whenever it runs NER on this article,
     -- regardless of how many entities (if any) were found - NOT the same
@@ -143,7 +144,7 @@ CREATE TABLE IF NOT EXISTS watchlist_matches (
 -- A story is a cluster of articles (possibly from different sources, possibly
 -- discovered on different days) judged to be reporting on the same underlying
 -- event. cluster-stories compares each newly-embedded relevant article
--- against stories touched within a rolling window (see MYOPIC_STORY_WINDOW_DAYS)
+-- against stories with members discovered within +/- MYOPIC_STORY_WINDOW_HOURS
 -- and either attaches it to an existing story or starts a new one.
 CREATE TABLE IF NOT EXISTS stories (
     id          SERIAL PRIMARY KEY,
